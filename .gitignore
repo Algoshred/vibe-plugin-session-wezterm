@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.env
+.env.local
+.vibe-env.json
+bun.lock.workspace
+.package.npm.json
+.package.workspace.json
+.claude/
+.DS_Store
+*.log
+sanity.log
+.npmrc
+temp/

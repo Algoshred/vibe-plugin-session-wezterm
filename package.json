@@ -1,0 +1,76 @@
+{
+  "name": "@burdenoff/vibe-plugin-session-wezterm",
+  "version": "0.0.0-dev",
+  "type": "module",
+  "main": "./dist/index.js",
+  "description": "WezTerm + ttyd session provider plugin for VibeControls Agent",
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "author": {
+    "name": "Vignesh T.V",
+    "email": "vignesh@burdenoff.com",
+    "url": "https://github.com/tvvignesh"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint ./src",
+    "format": "bunx prettier . --write",
+    "format:check": "bunx prettier . --check",
+    "type:check": "tsc --noEmit",
+    "clean": "rimraf dist",
+    "prebuild": "bun run clean",
+    "prepublishOnly": "bun run build",
+    "sanity": "bun run format:check && bun run lint && bun run type:check && bun run build"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/bun": "^1.3.9",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.30.1",
+    "globals": "^17.3.0",
+    "prettier": "^3.6.2",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.0"
+  },
+  "peerDependencies": {
+    "@burdenoff/vibe-agent": ">=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@burdenoff/vibe-agent": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "vibecontrols",
+    "vibe",
+    "vibe-plugin",
+    "wezterm",
+    "ttyd",
+    "session",
+    "terminal",
+    "bun",
+    "cross-platform"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/algoshred/vibe-plugin-session-wezterm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/algoshred/vibe-plugin-session-wezterm/issues"
+  },
+  "homepage": "https://vibecontrols.com",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ]
+}
