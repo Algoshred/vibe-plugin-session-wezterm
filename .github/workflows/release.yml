@@ -1,0 +1,145 @@
+# Release — Publish production release to npmjs as @vibecontrols/vibe-plugin-*
+#
+# Trigger: Manual workflow_dispatch or CalVer git tag push
+# Publishes to: https://www.npmjs.com/ (public)
+# Also publishes same version to Verdaccio (private, internal)
+#
+# CalVer: YYYY.MDD.PATCH (semver-compatible, no zero-padding)
+# NPM token: NPMJS_VIBECONTROLS_TOKEN (granular token for @vibecontrols scope)
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "CalVer version (e.g., 2026.323.1). Leave empty to auto-compute."
+        required: false
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release to npmjs + Verdaccio
+    runs-on: frontend-runners
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Lint & type check
+        run: bun run lint && bun run type:check
+
+      - name: Build
+        run: bun run build
+
+      - name: Pre-cache npm CLI
+        run: bunx npm@latest --version
+
+      - name: Determine version
+        id: version
+        run: |
+          NAME=$(bun -e "console.log(require('./package.json').name)")
+
+          if [ "${{ github.event_name }}" = "push" ] && [ -n "${{ github.ref_name }}" ]; then
+            VERSION="${{ github.ref_name }}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            YYYY=$(date -u '+%Y')
+            MDD=$((10#$(date -u '+%m%d')))
+            DATE_PREFIX="${YYYY}.${MDD}"
+
+            EXISTING=$(bunx npm@latest view "${NAME}" versions --json 2>/dev/null \
+              | jq -r '.[]? // empty' \
+              | grep -E "^${DATE_PREFIX}\.[0-9]+$" | sort -t. -k3 -n || true)
+
+            MAX_PATCH=$(echo "$EXISTING" | tail -1 | cut -d. -f3)
+            NEXT_PATCH=$(( ${MAX_PATCH:-0} + 1 ))
+            VERSION="${DATE_PREFIX}.${NEXT_PATCH}"
+          fi
+
+          if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[1-9][0-9]{0,3}\.[0-9]+$'; then
+            echo "::error::Invalid CalVer version: $VERSION (expected YYYY.MDD.PATCH)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Releasing: ${NAME}@$VERSION"
+
+      - name: Publish to npmjs (public)
+        run: |
+          cat > .npmrc << 'NPMRC'
+          //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+          NPMRC
+          sed -i 's/^ *//' .npmrc
+          bunx npm@latest version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+          bunx npm@latest publish --registry "https://registry.npmjs.org/" --access public --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPMJS_VIBECONTROLS_TOKEN }}
+
+      - name: Publish to Verdaccio (private)
+        run: |
+          VERDACCIO_URL="https://verdaccio.tooling.internal.burdenoff.com/"
+          AUTH=$(echo -n "ci-publisher:${{ secrets.VERDACCIO_CI_PASSWORD }}" | base64)
+          cat > .npmrc << NPMRC
+          registry=${VERDACCIO_URL}
+          //verdaccio.tooling.internal.burdenoff.com/:_auth=${AUTH}
+          NPMRC
+          sed -i 's/^ *//' .npmrc
+          bunx npm@latest publish --registry "${VERDACCIO_URL}" --tag latest --access restricted --ignore-scripts
+
+      - name: Create git tag (if manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config --local user.email "ci@burdenoff.com"
+          git config --local user.name "CI"
+          git tag "${{ steps.version.outputs.version }}" -m "Release ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          NAME="${{ steps.version.outputs.name }}"
+          gh release create "$VERSION" \
+            --title "${NAME}@${VERSION}" \
+            --notes "## ${NAME}@${VERSION}
+
+          ### Install
+          \`\`\`bash
+          npm install ${NAME}@${VERSION}
+          # or
+          bun add ${NAME}@${VERSION}
+          \`\`\`" \
+            --latest \
+            2>/dev/null || echo "Release already exists"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Production Release" >> $GITHUB_STEP_SUMMARY
+          echo "**Package**: \`${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**npmjs**: Published (public)" >> $GITHUB_STEP_SUMMARY
+          echo "**Verdaccio**: Published (private)" >> $GITHUB_STEP_SUMMARY

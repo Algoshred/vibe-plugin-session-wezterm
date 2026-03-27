@@ -1,5 +1,5 @@
 {
-  "name": "@burdenoff/vibe-plugin-session-wezterm",
+  "name": "@vibecontrols/vibe-plugin-session-wezterm",
   "version": "0.0.0-dev",
   "type": "module",
   "main": "./dist/index.js",
@@ -38,10 +38,10 @@
     "typescript-eslint": "^8.56.0"
   },
   "peerDependencies": {
-    "@burdenoff/vibe-agent": ">=2.0.0"
+    "@vibecontrols/agent": ">=2.0.0"
   },
   "peerDependenciesMeta": {
-    "@burdenoff/vibe-agent": {
+    "@vibecontrols/agent": {
       "optional": true
     }
   },
@@ -65,7 +65,7 @@
   },
   "homepage": "https://vibecontrols.com",
   "publishConfig": {
-    "access": "public",
+    "access": "restricted",
     "registry": "https://registry.npmjs.org/"
   },
   "files": [
