@@ -1,6 +1,6 @@
 # @burdenoff/vibe-plugin-session-wezterm
 
-WezTerm + ttyd session provider plugin for [VibeControls Agent](https://www.npmjs.com/package/@burdenoff/vibe-agent).
+WezTerm + ttyd session provider plugin for [VibeControls Agent](https://www.npmjs.com/package/@vibecontrols/agent).
 
 Cross-platform alternative to the tmux session plugin — works on Windows, macOS, and Linux.
 

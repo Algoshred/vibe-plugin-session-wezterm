@@ -16,10 +16,10 @@
         "typescript-eslint": "^8.56.0",
       },
       "peerDependencies": {
-        "@burdenoff/vibe-agent": ">=2.0.0",
+        "@vibecontrols/agent": ">=2.0.0",
       },
       "optionalPeers": [
-        "@burdenoff/vibe-agent",
+        "@vibecontrols/agent",
       ],
     },
   },
