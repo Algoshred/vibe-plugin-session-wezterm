@@ -898,6 +898,17 @@ class WeztermSessionProvider implements SessionProvider {
     const cwd = session.workingDirectory || process.env.HOME || "/";
     const shell =
       (session.metadata?.shell as string) || process.env.SHELL || "/bin/bash";
+
+    // Set wezterm-specific env vars so the shell identifies as a wezterm session.
+    // We intentionally do NOT strip other multiplexer vars (TMUX, STY, etc.) —
+    // the agent may run inside tmux/screen and other providers may coexist.
+    const ttydEnv: Record<string, string | undefined> = { ...process.env };
+    ttydEnv.WEZTERM_PANE = String(paneId);
+    ttydEnv.WEZTERM_UNIX_SOCKET =
+      process.env.WEZTERM_UNIX_SOCKET || "managed-by-vibecontrols";
+    ttydEnv.TERM_PROGRAM = "WezTerm";
+    ttydEnv.VIBECONTROLS_PROVIDER = "wezterm";
+
     const child = Bun.spawn(
       [
         "ttyd",
@@ -915,6 +926,7 @@ class WeztermSessionProvider implements SessionProvider {
         stderr: "ignore",
         stdin: "ignore",
         cwd,
+        env: ttydEnv as Record<string, string>,
       },
     );
 
