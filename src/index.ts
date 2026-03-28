@@ -889,7 +889,15 @@ class WeztermSessionProvider implements SessionProvider {
       port: assignedPort,
     });
 
-    // Spawn ttyd process using wezterm cli proxy to expose the pane as a PTY
+    // Spawn ttyd process.
+    // Unlike tmux (which has `tmux attach`), wezterm's headless mux server
+    // does not expose an "attach to pane" command suitable for wrapping with
+    // ttyd. Instead we start ttyd with a shell in the session's working
+    // directory. The wezterm workspace tracks the session lifecycle while
+    // ttyd provides the browser-accessible terminal.
+    const cwd = session.workingDirectory || process.env.HOME || "/";
+    const shell =
+      (session.metadata?.shell as string) || process.env.SHELL || "/bin/bash";
     const child = Bun.spawn(
       [
         "ttyd",
@@ -900,16 +908,13 @@ class WeztermSessionProvider implements SessionProvider {
         "--writable",
         "--port",
         String(assignedPort),
-        "wezterm",
-        "cli",
-        "proxy",
-        "--pane-id",
-        String(paneId),
+        shell,
       ],
       {
         stdout: "ignore",
         stderr: "ignore",
         stdin: "ignore",
+        cwd,
       },
     );
 
