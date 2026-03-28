@@ -448,15 +448,8 @@ class WeztermSessionProvider implements SessionProvider {
       provider: this.name,
     });
 
-    // Verify wezterm is available
-    try {
-      const version = weztermExec(["--version"]);
-      this.log.info("wezterm detected", { version });
-    } catch {
-      this.log.error(
-        "wezterm is not installed or not in PATH — session provider will not function",
-      );
-    }
+    // Auto-install wezterm if not available
+    await this.ensureDependencies();
 
     // Ensure mux server is running for headless operation
     await this.ensureMuxServer();
@@ -1502,6 +1495,118 @@ class WeztermSessionProvider implements SessionProvider {
 
   /**
    * Ensure the wezterm mux server is running for headless operation.
+   * Auto-install wezterm if not found in PATH.
+   * Each plugin owns its own binary installation (adapter pattern).
+   */
+  private async ensureDependencies(): Promise<void> {
+    try {
+      const version = weztermExec(["--version"]);
+      this.log.info("wezterm detected", { version: version.trim() });
+      return;
+    } catch {
+      this.log.info("wezterm not found — attempting auto-install");
+    }
+
+    const platform = process.platform;
+    const arch = process.arch;
+    const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp";
+
+    try {
+      if (platform === "linux") {
+        // Download AppImage, extract, create wrapper scripts
+        const binDir = `${homeDir}/bin`;
+        const distDir = `${binDir}/wezterm-dist`;
+        Bun.spawnSync(["mkdir", "-p", binDir], { timeout: 5_000 });
+
+        const appImageUrl =
+          "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-20240203-110809-5046fc22-Ubuntu20.04.AppImage";
+        this.log.info("Downloading WezTerm AppImage...");
+        const dl = Bun.spawnSync(
+          ["curl", "-sL", appImageUrl, "-o", "/tmp/wezterm.AppImage"],
+          { timeout: 120_000, stdout: "pipe", stderr: "pipe" },
+        );
+        if (dl.exitCode !== 0)
+          throw new Error(`Download failed: ${dl.stderr.toString()}`);
+
+        Bun.spawnSync(["chmod", "+x", "/tmp/wezterm.AppImage"], {
+          timeout: 5_000,
+        });
+
+        // Extract (no FUSE needed)
+        Bun.spawnSync(
+          ["sh", "-c", "cd /tmp && ./wezterm.AppImage --appimage-extract"],
+          { timeout: 30_000, stdout: "pipe", stderr: "pipe" },
+        );
+
+        // Copy binaries
+        Bun.spawnSync(["mkdir", "-p", distDir], { timeout: 5_000 });
+        Bun.spawnSync(
+          [
+            "sh",
+            "-c",
+            `cp /tmp/squashfs-root/usr/bin/* ${distDir}/ && cp -r /tmp/squashfs-root/usr/lib ${distDir}/lib 2>/dev/null; true`,
+          ],
+          { timeout: 10_000, stdout: "pipe", stderr: "pipe" },
+        );
+
+        // Create wrapper scripts with LD_LIBRARY_PATH
+        for (const bin of ["wezterm", "wezterm-mux-server"]) {
+          const wrapper = `#!/bin/bash\nexport LD_LIBRARY_PATH="${distDir}/lib:$LD_LIBRARY_PATH"\nexec "${distDir}/${bin}" "$@"\n`;
+          await Bun.write(`${binDir}/${bin}`, wrapper);
+          Bun.spawnSync(["chmod", "+x", `${binDir}/${bin}`], {
+            timeout: 5_000,
+          });
+        }
+
+        // Cleanup
+        Bun.spawnSync(
+          ["rm", "-rf", "/tmp/wezterm.AppImage", "/tmp/squashfs-root"],
+          { timeout: 5_000 },
+        );
+
+        // Add to PATH for current process
+        process.env.PATH = `${binDir}:${process.env.PATH}`;
+      } else if (platform === "darwin") {
+        const r = Bun.spawnSync(["brew", "install", "--cask", "wezterm"], {
+          timeout: 120_000,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+      } else if (platform === "win32") {
+        const localApps =
+          process.env.LOCALAPPDATA || `${homeDir}/AppData/Local`;
+        const installDir = `${localApps}/Programs/WezTerm`;
+        const zipUrl =
+          "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-windows-20240203-110809-5046fc22.zip";
+        const ps = Bun.spawnSync(
+          [
+            "powershell",
+            "-Command",
+            `New-Item -ItemType Directory -Force -Path '${installDir}'; Invoke-WebRequest -Uri '${zipUrl}' -OutFile '$env:TEMP\\wezterm.zip'; Expand-Archive -Force '$env:TEMP\\wezterm.zip' -DestinationPath '${installDir}'; Remove-Item '$env:TEMP\\wezterm.zip'`,
+          ],
+          { timeout: 120_000, stdout: "pipe", stderr: "pipe" },
+        );
+        if (ps.exitCode !== 0) throw new Error(ps.stderr.toString());
+        process.env.PATH = `${installDir}:${process.env.PATH}`;
+      }
+
+      // Verify
+      const version = weztermExec(["--version"]);
+      this.log.info("wezterm auto-installed successfully", {
+        version: version.trim(),
+      });
+    } catch (err) {
+      this.log.error("Failed to auto-install wezterm", {
+        error: String(err),
+      });
+      this.log.error(
+        "wezterm is not available — session provider will not function",
+      );
+    }
+  }
+
+  /**
    * If `wezterm cli list` fails, start `wezterm-mux-server --daemonize`.
    */
   private async ensureMuxServer(): Promise<void> {
