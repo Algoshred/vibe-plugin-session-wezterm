@@ -899,15 +899,32 @@ class WeztermSessionProvider implements SessionProvider {
     const shell =
       (session.metadata?.shell as string) || process.env.SHELL || "/bin/bash";
 
-    // Set wezterm-specific env vars so the shell identifies as a wezterm session.
-    // We intentionally do NOT strip other multiplexer vars (TMUX, STY, etc.) —
-    // the agent may run inside tmux/screen and other providers may coexist.
+    // Build the ttyd shell environment.
+    // Set wezterm-identifying vars, and if the agent itself is running inside
+    // a different provider (e.g. tmux), remove that provider's vars so the
+    // ttyd shell correctly identifies as wezterm-managed.
     const ttydEnv: Record<string, string | undefined> = { ...process.env };
+
+    // Set wezterm identity
     ttydEnv.WEZTERM_PANE = String(paneId);
     ttydEnv.WEZTERM_UNIX_SOCKET =
       process.env.WEZTERM_UNIX_SOCKET || "managed-by-vibecontrols";
     ttydEnv.TERM_PROGRAM = "WezTerm";
     ttydEnv.VIBECONTROLS_PROVIDER = "wezterm";
+
+    // If the agent is running inside another provider, clean those vars.
+    // Each provider registers the env vars that identify it; when spawning
+    // a session for a *different* provider we strip the inherited ones.
+    const otherProviderVars: Record<string, string[]> = {
+      tmux: ["TMUX", "TMUX_PANE", "TMUX_PLUGIN_MANAGER_PATH"],
+      screen: ["STY", "WINDOW"],
+      zellij: ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"],
+    };
+    for (const vars of Object.values(otherProviderVars)) {
+      for (const v of vars) {
+        if (v in ttydEnv) delete ttydEnv[v];
+      }
+    }
 
     const child = Bun.spawn(
       [
