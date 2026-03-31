@@ -10,7 +10,7 @@
  * Uses `wezterm-mux-server` for headless operation (similar to tmux's server).
  */
 
-import type { Subprocess } from "bun";
+// Subprocess type not needed — we track PIDs only for restart resilience
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,7 +153,7 @@ interface VibePlugin {
     session?: SessionProvider;
   };
   onServerStart?(services: HostServices): Promise<void>;
-  onServerStop?(): Promise<void>;
+  onServerStop?(context?: { reason: "reload" | "shutdown" }): Promise<void>;
   onCliSetup?(): void;
 }
 
@@ -426,8 +426,8 @@ class WeztermSessionProvider implements SessionProvider {
     };
   })();
 
-  /** In-memory map of ttyd child processes keyed by session ID. */
-  private ttydProcesses: Map<string, Subprocess> = new Map();
+  /** In-memory map of ttyd PIDs keyed by session ID. */
+  private ttydPids: Map<string, number> = new Map();
 
   /** In-memory map of ttyd port assignments keyed by session ID. */
   private ttydPorts: Map<string, number> = new Map();
@@ -462,16 +462,30 @@ class WeztermSessionProvider implements SessionProvider {
 
   /**
    * Graceful shutdown: stop all ttyd terminals.
+   * When reason is 'reload', preserve sessions and ttyd processes for re-adoption.
    */
-  async shutdown(): Promise<void> {
-    this.log.info("WeztermSessionProvider shutting down — stopping terminals");
+  async shutdown(context?: { reason: "reload" | "shutdown" }): Promise<void> {
+    if (context?.reason === "reload") {
+      this.log.info(
+        "Hot-reload: preserving wezterm sessions and ttyd processes",
+      );
+      await this.persistTerminals();
+      this.ttydPids.clear();
+      this.ttydPorts.clear();
+      return;
+    }
 
+    this.log.info("WeztermSessionProvider shutting down — stopping terminals");
     const stopPromises: Promise<void>[] = [];
-    for (const [sessionId] of this.ttydProcesses) {
+    for (const [sessionId] of this.ttydPids) {
       stopPromises.push(this.stopTerminal(sessionId));
     }
     await Promise.allSettled(stopPromises);
-
+    try {
+      await this.storage.delete(STORAGE_NAMESPACE, "terminals");
+    } catch {
+      /* ignore */
+    }
     this.log.info("WeztermSessionProvider shutdown complete");
   }
 
@@ -605,7 +619,7 @@ class WeztermSessionProvider implements SessionProvider {
     });
 
     // Stop terminal first if running
-    if (this.ttydProcesses.has(sessionId)) {
+    if (this.ttydPids.has(sessionId)) {
       await this.stopTerminal(sessionId);
     }
 
@@ -948,8 +962,9 @@ class WeztermSessionProvider implements SessionProvider {
     await sleep(500);
 
     // Store references
-    this.ttydProcesses.set(sessionId, child);
+    this.ttydPids.set(sessionId, child.pid);
     this.ttydPorts.set(sessionId, assignedPort);
+    await this.persistTerminals();
 
     const terminalInfo: TerminalInfo = {
       url: `http://localhost:${assignedPort}`,
@@ -972,23 +987,22 @@ class WeztermSessionProvider implements SessionProvider {
   }
 
   async stopTerminal(sessionId: string): Promise<void> {
-    const child = this.ttydProcesses.get(sessionId);
-    if (!child) {
+    const pid = this.ttydPids.get(sessionId);
+    if (!pid) {
       this.log.debug("No ttyd process found for session", { sessionId });
       return;
     }
 
     this.log.info("Stopping ttyd terminal", {
       sessionId,
-      pid: child.pid,
+      pid,
     });
 
-    if (child.pid) {
-      await gracefulKill(child.pid);
-    }
+    await gracefulKill(pid);
 
-    this.ttydProcesses.delete(sessionId);
+    this.ttydPids.delete(sessionId);
     this.ttydPorts.delete(sessionId);
+    await this.persistTerminals();
 
     // Clear terminal from session record
     const session = await this.getInfo(sessionId);
@@ -1045,11 +1059,11 @@ class WeztermSessionProvider implements SessionProvider {
   async listSystemTerminals(): Promise<SystemTerminalInfo[]> {
     const terminals: SystemTerminalInfo[] = [];
 
-    for (const [sessionId, child] of this.ttydProcesses) {
+    for (const [sessionId, pid] of this.ttydPids) {
       const port = this.ttydPorts.get(sessionId);
-      if (child.pid && port !== undefined) {
+      if (pid && port !== undefined) {
         terminals.push({
-          pid: child.pid,
+          pid,
           port,
           sessionId,
         });
@@ -1073,9 +1087,7 @@ class WeztermSessionProvider implements SessionProvider {
             if (!pid) continue;
 
             // Skip already-tracked processes
-            const alreadyTracked = [...this.ttydProcesses.values()].some(
-              (p) => p.pid === pid,
-            );
+            const alreadyTracked = [...this.ttydPids.values()].includes(pid);
             if (alreadyTracked) continue;
 
             // Try to extract port from command line
@@ -1149,9 +1161,9 @@ class WeztermSessionProvider implements SessionProvider {
         killed++;
 
         // Remove from tracked processes if present
-        for (const [sessionId, child] of this.ttydProcesses) {
-          if (child.pid === pid) {
-            this.ttydProcesses.delete(sessionId);
+        for (const [sessionId, trackedPid] of this.ttydPids) {
+          if (trackedPid === pid) {
+            this.ttydPids.delete(sessionId);
             this.ttydPorts.delete(sessionId);
             break;
           }
@@ -1175,7 +1187,7 @@ class WeztermSessionProvider implements SessionProvider {
     let weztermOk: boolean;
     let weztermVersion: string;
     let sessionCount = 0;
-    const terminalCount = this.ttydProcesses.size;
+    const terminalCount = this.ttydPids.size;
 
     try {
       weztermVersion = weztermExec(["--version"]);
@@ -1241,7 +1253,7 @@ class WeztermSessionProvider implements SessionProvider {
 
       if (session.status === "terminated" || !exists) {
         // Stop terminal if somehow still running
-        if (this.ttydProcesses.has(session.id)) {
+        if (this.ttydPids.has(session.id)) {
           await this.stopTerminal(session.id);
         }
 
@@ -1327,9 +1339,9 @@ class WeztermSessionProvider implements SessionProvider {
   async killSystemTerminal(pid: number): Promise<void> {
     await gracefulKill(pid);
     // Remove from tracked processes if present
-    for (const [sessionId, child] of this.ttydProcesses) {
-      if (child.pid === pid) {
-        this.ttydProcesses.delete(sessionId);
+    for (const [sessionId, trackedPid] of this.ttydPids) {
+      if (trackedPid === pid) {
+        this.ttydPids.delete(sessionId);
         this.ttydPorts.delete(sessionId);
         break;
       }
@@ -1472,16 +1484,16 @@ class WeztermSessionProvider implements SessionProvider {
    * Get TerminalInfo for a session if ttyd is currently running.
    */
   private getRunningTerminalInfo(sessionId: string): TerminalInfo | null {
-    const child = this.ttydProcesses.get(sessionId);
+    const pid = this.ttydPids.get(sessionId);
     const port = this.ttydPorts.get(sessionId);
 
-    if (!child || !child.pid || port === undefined) {
+    if (!pid || port === undefined) {
       return null;
     }
 
     // Verify process is still alive
-    if (!isProcessAlive(child.pid)) {
-      this.ttydProcesses.delete(sessionId);
+    if (!isProcessAlive(pid)) {
+      this.ttydPids.delete(sessionId);
       this.ttydPorts.delete(sessionId);
       return null;
     }
@@ -1489,7 +1501,7 @@ class WeztermSessionProvider implements SessionProvider {
     return {
       url: `http://localhost:${port}`,
       port,
-      pid: child.pid,
+      pid,
     };
   }
 
@@ -1652,10 +1664,139 @@ class WeztermSessionProvider implements SessionProvider {
   }
 
   /**
+   * Persist current ttyd PID/port map to storage so a reloaded instance can
+   * re-adopt the still-running ttyd processes.
+   */
+  private async persistTerminals(): Promise<void> {
+    try {
+      const entries: Array<{ sessionId: string; pid: number; port: number }> =
+        [];
+      for (const [sessionId, pid] of this.ttydPids) {
+        const port = this.ttydPorts.get(sessionId);
+        if (port !== undefined) {
+          entries.push({ sessionId, pid, port });
+        }
+      }
+      await this.storage.set(
+        STORAGE_NAMESPACE,
+        "terminals",
+        JSON.stringify(entries),
+      );
+    } catch (err) {
+      this.log.error("Failed to persist terminals", { error: String(err) });
+    }
+  }
+
+  /**
+   * Load persisted terminal entries from storage (written before a hot-reload).
+   */
+  private async loadPersistedTerminals(): Promise<
+    Array<{ sessionId: string; pid: number; port: number }>
+  > {
+    try {
+      const raw = await this.storage.get(STORAGE_NAMESPACE, "terminals");
+      if (!raw) return [];
+      return JSON.parse(raw) as Array<{
+        sessionId: string;
+        pid: number;
+        port: number;
+      }>;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Reconcile persisted session records against actual wezterm state.
-   * Marks sessions as inactive/terminated if their workspace is gone.
+   * Three phases:
+   *   1. Recover persisted terminals (re-adopt PIDs that are still alive)
+   *   2. Orphan scan via pgrep — match by port from persisted session data
+   *   3. Multiplexer state sync (mark sessions inactive if workspace is gone)
    */
   private async reconcileSessions(): Promise<void> {
+    // --- Phase 1: Recover persisted terminals ---
+    const persisted = await this.loadPersistedTerminals();
+    if (persisted.length > 0) {
+      this.log.info("Recovering persisted terminals", {
+        count: persisted.length,
+      });
+      for (const entry of persisted) {
+        if (isProcessAlive(entry.pid)) {
+          this.ttydPids.set(entry.sessionId, entry.pid);
+          this.ttydPorts.set(entry.sessionId, entry.port);
+          this.log.info("Re-adopted ttyd process", {
+            sessionId: entry.sessionId,
+            pid: entry.pid,
+            port: entry.port,
+          });
+        } else {
+          this.log.info("Persisted ttyd process is dead, skipping", {
+            sessionId: entry.sessionId,
+            pid: entry.pid,
+          });
+        }
+      }
+      // Clean up persisted data after recovery
+      try {
+        await this.storage.delete(STORAGE_NAMESPACE, "terminals");
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // --- Phase 2: Orphan scan via pgrep ---
+    if (!isWindows()) {
+      try {
+        const pgrepResult = Bun.spawnSync(["pgrep", "-a", "ttyd"], {
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 5000,
+        });
+        const raw = pgrepResult.stdout.toString().trim();
+
+        if (raw) {
+          // Build a reverse lookup: port -> sessionId from sessions that have terminal info
+          const sessions = await this.loadSessions();
+          const portToSession = new Map<number, string>();
+          for (const session of sessions) {
+            if (session.terminal?.port) {
+              portToSession.set(session.terminal.port, session.id);
+            }
+          }
+
+          for (const line of raw.split("\n")) {
+            const parts = line.trim().split(/\s+/);
+            const pid = parseInt(parts[0] ?? "0", 10);
+            if (!pid) continue;
+
+            // Skip already-tracked
+            if ([...this.ttydPids.values()].includes(pid)) continue;
+
+            // Extract port from command line
+            const portIdx = parts.indexOf("--port");
+            const port =
+              portIdx !== -1 ? parseInt(parts[portIdx + 1] ?? "0", 10) : 0;
+            if (!port) continue;
+
+            // Match by port to a known session
+            const sessionId = portToSession.get(port);
+            if (sessionId && !this.ttydPids.has(sessionId)) {
+              this.ttydPids.set(sessionId, pid);
+              this.ttydPorts.set(sessionId, port);
+              this.log.info("Recovered orphaned ttyd process by port match", {
+                sessionId,
+                pid,
+                port,
+              });
+            }
+          }
+        }
+      } catch {
+        // pgrep returns non-zero when no processes found — that's fine
+      }
+    }
+
+    // --- Phase 3: Multiplexer state sync ---
     const sessions = await this.loadSessions();
     let changed = false;
 
@@ -1704,8 +1845,10 @@ const vibePlugin: VibePlugin = {
     await provider.init(services);
   },
 
-  async onServerStop(): Promise<void> {
-    await provider.shutdown();
+  async onServerStop(context?: {
+    reason: "reload" | "shutdown";
+  }): Promise<void> {
+    await provider.shutdown(context);
   },
 };
 
