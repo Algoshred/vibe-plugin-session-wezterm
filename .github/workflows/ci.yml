@@ -27,7 +27,7 @@ concurrency:
 jobs:
   test:
     name: Test & Build
-    runs-on: frontend-runners
+    runs-on: org-runners
     timeout-minutes: 10
 
     steps:
@@ -55,7 +55,7 @@ jobs:
     name: Publish to Verdaccio
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: frontend-runners
+    runs-on: org-runners
     timeout-minutes: 10
 
     steps:

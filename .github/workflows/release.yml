@@ -27,7 +27,7 @@ concurrency:
 jobs:
   release:
     name: Release to npmjs + Verdaccio
-    runs-on: frontend-runners
+    runs-on: org-runners
     timeout-minutes: 10
     permissions:
       contents: write
