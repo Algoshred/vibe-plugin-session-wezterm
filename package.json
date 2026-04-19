@@ -72,5 +72,22 @@
     "dist/**/*",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "overrides": {
+    "lodash": ">=4.17.21",
+    "lodash-es": ">=4.17.21",
+    "dompurify": ">=3.3.4",
+    "fast-xml-parser": ">=4.5.5",
+    "@xmldom/xmldom": ">=0.8.12",
+    "swiper": ">=12.1.2",
+    "brace-expansion": ">=1.1.13",
+    "follow-redirects": ">=1.15.12",
+    "smol-toml": ">=1.6.1",
+    "axios": ">=1.15.0",
+    "flatted": ">=3.4.1",
+    "yaml": ">=2.8.3",
+    "picomatch": ">=2.3.2",
+    "immutable": ">=3.8.3",
+    "minimatch": ">=3.1.3"
+  }
 }
