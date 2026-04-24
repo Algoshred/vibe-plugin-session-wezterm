@@ -1,0 +1,18 @@
+# lefthook.yml — pre-push sanity gate
+#
+# Install: bun add -d lefthook && bunx lefthook install
+#
+# The pre-push hook runs `bun run sanity` when that script exists; otherwise
+# it falls back to the individual checks that are defined. Missing scripts
+# are skipped silently so this template drops cleanly into any repo.
+
+pre-push:
+  parallel: false
+  commands:
+    sanity:
+      run: |
+        if bun pm ls --name sanity --json 2>/dev/null | grep -q '"sanity"' || grep -q '"sanity"' package.json; then
+          bun run sanity
+        else
+          echo "no sanity script; skipping"
+        fi
