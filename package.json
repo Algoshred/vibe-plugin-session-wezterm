@@ -1,6 +1,6 @@
 {
   "name": "@vibecontrols/vibe-plugin-session-wezterm",
-  "version": "2026.428.1",
+  "version": "2026.428.3",
   "type": "module",
   "main": "./dist/index.js",
   "description": "WezTerm + ttyd session provider plugin for VibeControls Agent",
@@ -65,7 +65,7 @@
   },
   "homepage": "https://vibecontrols.com",
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "files": [
