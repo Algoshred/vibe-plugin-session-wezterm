@@ -1411,9 +1411,12 @@ class WeztermSessionProvider implements SessionProvider {
         sessionId,
         error: String(err),
       });
-      throw new Error(`Failed to get scrollback for session ${sessionId}: ${err}`, {
-        cause: err,
-      });
+      throw new Error(
+        `Failed to get scrollback for session ${sessionId}: ${err}`,
+        {
+          cause: err,
+        },
+      );
     }
   }
 
