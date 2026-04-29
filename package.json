@@ -1,6 +1,6 @@
 {
   "name": "@vibecontrols/vibe-plugin-session-wezterm",
-  "version": "2026.428.3",
+  "version": "2026.428.4",
   "type": "module",
   "main": "./dist/index.js",
   "description": "WezTerm + ttyd session provider plugin for VibeControls Agent",
@@ -14,7 +14,7 @@
   },
   "license": "SEE LICENSE IN LICENSE",
   "scripts": {
-    "build": "tsc",
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --minify-syntax --minify-whitespace --external elysia && tsc --emitDeclarationOnly --declaration --outDir ./dist",
     "dev": "tsc --watch",
     "lint": "eslint ./src",
     "lint:sanity": "if [ \"${CI:-}\" = \"true\" ]; then bun run lint; else bun run lint -- --cache --cache-location .eslintcache; fi",
@@ -71,6 +71,7 @@
   },
   "files": [
     "dist/**/*",
+    "!dist/**/*.map",
     "README.md",
     "LICENSE"
   ],
