@@ -1934,7 +1934,7 @@ class WeztermSessionProvider implements SessionProvider {
 const provider = new WeztermSessionProvider();
 
 const vibePlugin: VibePlugin = {
-  name: "@burdenoff/vibe-plugin-session-wezterm",
+  name: "session-wezterm",
   version: "2.3.0",
   description:
     "WezTerm + ttyd session provider — manages terminal sessions via WezTerm workspaces and exposes web terminals via ttyd",
