@@ -40,7 +40,7 @@
   },
   "peerDependencies": {
     "@vibecontrols/agent": "2026.428.5",
-    "@vibecontrols/vibe-plugin-session-manager": "^2026.428.4"
+    "@vibecontrols/vibe-plugin-session-manager": "^2026.506.3"
   },
   "peerDependenciesMeta": {
     "@vibecontrols/agent": {
