@@ -28,6 +28,8 @@ interface SessionConfig {
   shell?: string;
   size?: { cols: number; rows: number };
   projectId?: string;
+  /** Optional provider-native session name. */
+  externalName?: string;
 }
 
 interface SessionInfo {
@@ -122,6 +124,18 @@ interface SessionProvider {
     sessionId: string,
     pattern: string,
   ): Promise<Array<{ line: number; content: string }>>;
+
+  // Optional orphan discovery / adoption
+  discoverOrphans?(): Promise<OrphanSessionInfo[]>;
+  adopt?(externalName: string, displayName?: string): Promise<SessionInfo>;
+}
+
+interface OrphanSessionInfo {
+  externalName: string;
+  provider: string;
+  windows: number;
+  attached: boolean;
+  createdAt?: string;
 }
 
 interface SessionProviderCapabilities {
@@ -518,6 +532,23 @@ class WeztermSessionProvider implements SessionProvider {
   // -----------------------------------------------------------------------
 
   async create(config: SessionConfig): Promise<SessionInfo> {
+    // Attach-or-create on explicit externalName (workspace name).
+    if (config.externalName) {
+      const target = config.externalName;
+      if (target.length === 0 || target.length > 128 || /[\0\r\n\s]/.test(target)) {
+        throw new Error(`Invalid externalName: ${target}`);
+      }
+      const sys = await this.listSystemSessions();
+      if (sys.find((s) => s.name === target)) {
+        this.log.info("create(): attaching to existing wezterm workspace", {
+          target,
+        });
+        return this.adopt(target, config.name);
+      }
+      throw new Error(
+        `No wezterm workspace named "${target}" — drop externalName to create a new one`,
+      );
+    }
     const id = config.id || generateId();
     const workspaceName = `vibe-${id.substring(0, 8)}`;
     const now = nowISO();
@@ -1370,6 +1401,80 @@ class WeztermSessionProvider implements SessionProvider {
         break;
       }
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Orphan discovery & adoption
+  // wezterm workspaces survive agent restarts. Same pattern as tmux —
+  // expose `vibe-*` workspaces not in storage so the UI can reconnect.
+  // -----------------------------------------------------------------------
+
+  async discoverOrphans(): Promise<OrphanSessionInfo[]> {
+    const known = new Set(
+      (await this.loadSessions())
+        .filter((s) => s.status !== "terminated")
+        .map((s) => this.getWorkspaceName(s)),
+    );
+    const sys = await this.listSystemSessions();
+    return sys
+      .filter((s) => s.name.startsWith("vibe-") && !known.has(s.name))
+      .map((s) => ({
+        externalName: s.name,
+        provider: "wezterm",
+        windows: s.windows,
+        attached: s.attached,
+        createdAt: s.createdAt,
+      }));
+  }
+
+  async adopt(
+    externalName: string,
+    displayName?: string,
+  ): Promise<SessionInfo> {
+    if (!externalName.startsWith("vibe-")) {
+      throw new Error(
+        `Refusing to adopt wezterm workspace "${externalName}" — only vibe-* workspaces are adoptable`,
+      );
+    }
+    const sys = await this.listSystemSessions();
+    if (!sys.find((s) => s.name === externalName)) {
+      throw new Error(
+        `Wezterm workspace "${externalName}" does not exist`,
+      );
+    }
+    const id = externalName.slice("vibe-".length) || externalName;
+    const existing = (await this.loadSessions()).find((s) => s.id === id);
+    if (existing) {
+      if (!this.ttydPids.has(id)) {
+        try {
+          await this.startTerminal(id);
+        } catch {
+          /* best-effort */
+        }
+      }
+      return (await this.get(id)) ?? existing;
+    }
+    const now = nowISO();
+    const info: SessionInfo = {
+      id,
+      name: displayName || externalName,
+      status: "active",
+      provider: this.name,
+      createdAt: now,
+      updatedAt: now,
+      metadata: {
+        weztermWorkspace: externalName,
+        adopted: true,
+      },
+    };
+    await this.saveSession(info);
+    try {
+      info.terminal = await this.startTerminal(id);
+      await this.saveSession(info);
+    } catch {
+      /* best-effort */
+    }
+    return info;
   }
 
   // -----------------------------------------------------------------------
