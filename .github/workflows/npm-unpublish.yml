@@ -1,0 +1,68 @@
+# =============================================================================
+# Manual unpublish of @vibecontrols/vibe-plugin-session-wezterm versions from npmjs.
+# =============================================================================
+# Uses the same NPMJS_VIBECONTROLS_TOKEN granular token as release.yml.
+# Within the npm 72-hour unpublish window; after that, falls back to deprecate.
+# =============================================================================
+
+name: NPM Unpublish
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "Comma- or space-separated CalVer versions to unpublish (e.g. 2026.506.10,2026.506.11)"
+        required: true
+      mode:
+        description: "unpublish (delete tarball) or deprecate (mark deprecated, keep tarball)"
+        type: choice
+        options: [unpublish, deprecate]
+        default: unpublish
+      message:
+        description: "Deprecation message (only used when mode=deprecate)"
+        default: "Superseded by latest"
+
+permissions:
+  contents: read
+
+jobs:
+  npm-unpublish:
+    name: NPM Unpublish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure npmjs auth
+        run: |
+          cat > ~/.npmrc <<EOF
+          //registry.npmjs.org/:_authToken=${{ secrets.NPMJS_VIBECONTROLS_TOKEN }}
+          registry=https://registry.npmjs.org/
+          EOF
+          chmod 600 ~/.npmrc
+
+      - name: Verify identity
+        run: npm whoami --registry https://registry.npmjs.org/
+
+      - name: Run ${{ inputs.mode }}
+        env:
+          MODE: ${{ inputs.mode }}
+          VERSIONS_RAW: ${{ inputs.versions }}
+          DEPRECATE_MSG: ${{ inputs.message }}
+        run: |
+          set -u
+          VERSIONS=$(echo "$VERSIONS_RAW" | tr ',\n' '  ' | tr -s ' ')
+          for v in $VERSIONS; do
+            [ -z "$v" ] && continue
+            spec="@vibecontrols/vibe-plugin-session-wezterm@$v"
+            echo "::group::$MODE $spec"
+            if [ "$MODE" = "unpublish" ]; then
+              npm unpublish "$spec" --registry https://registry.npmjs.org/ || \
+                echo "::warning::unpublish $spec failed (may be >72h old or not present)"
+            else
+              npm deprecate "$spec" "$DEPRECATE_MSG" --registry https://registry.npmjs.org/ || \
+                echo "::warning::deprecate $spec failed"
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Show remaining versions
+        run: npm view @vibecontrols/vibe-plugin-session-wezterm versions --json --registry https://registry.npmjs.org/ || true
