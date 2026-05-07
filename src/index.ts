@@ -11,6 +11,8 @@
  */
 
 // Subprocess type not needed — we track PIDs only for restart resilience
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1729,32 +1731,44 @@ class WeztermSessionProvider implements SessionProvider {
 
     const platform = process.platform;
     const arch = process.arch;
-    const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp";
+    const homeDir = process.env.HOME || process.env.USERPROFILE || tmpdir();
 
     try {
       if (platform === "linux") {
-        // Download AppImage, extract, create wrapper scripts
+        // Download AppImage, extract, create wrapper scripts. Use tmpdir()
+        // (honours TMPDIR) instead of hardcoded /tmp so installs work in
+        // sandboxed environments where /tmp is read-only.
         const binDir = `${homeDir}/bin`;
         const distDir = `${binDir}/wezterm-dist`;
+        const tmpRoot = tmpdir();
+        const appImagePath = joinPath(tmpRoot, "wezterm.AppImage");
+        const squashRoot = joinPath(tmpRoot, "squashfs-root");
         Bun.spawnSync(["mkdir", "-p", binDir], { timeout: 5_000 });
 
         const appImageUrl =
           "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-20240203-110809-5046fc22-Ubuntu20.04.AppImage";
         this.log.info("Downloading WezTerm AppImage...");
         const dl = Bun.spawnSync(
-          ["curl", "-sL", appImageUrl, "-o", "/tmp/wezterm.AppImage"],
+          ["curl", "-sL", appImageUrl, "-o", appImagePath],
           { timeout: 120_000, stdout: "pipe", stderr: "pipe" },
         );
         if (dl.exitCode !== 0)
           throw new Error(`Download failed: ${dl.stderr.toString()}`);
 
-        Bun.spawnSync(["chmod", "+x", "/tmp/wezterm.AppImage"], {
-          timeout: 5_000,
-        });
+        // chmod +x is meaningless on Windows (no POSIX execute bit), but
+        // this entire branch is gated by `platform === "linux"`. Still, we
+        // keep the call platform-defensive in case of future refactors.
+        if (process.platform !== "win32") {
+          Bun.spawnSync(["chmod", "+x", appImagePath], { timeout: 5_000 });
+        }
 
         // Extract (no FUSE needed)
         Bun.spawnSync(
-          ["sh", "-c", "cd /tmp && ./wezterm.AppImage --appimage-extract"],
+          [
+            "sh",
+            "-c",
+            `cd ${tmpRoot} && ./wezterm.AppImage --appimage-extract`,
+          ],
           { timeout: 30_000, stdout: "pipe", stderr: "pipe" },
         );
 
@@ -1764,7 +1778,7 @@ class WeztermSessionProvider implements SessionProvider {
           [
             "sh",
             "-c",
-            `cp /tmp/squashfs-root/usr/bin/* ${distDir}/ && cp -r /tmp/squashfs-root/usr/lib ${distDir}/lib 2>/dev/null; true`,
+            `cp ${squashRoot}/usr/bin/* ${distDir}/ && cp -r ${squashRoot}/usr/lib ${distDir}/lib 2>/dev/null; true`,
           ],
           { timeout: 10_000, stdout: "pipe", stderr: "pipe" },
         );
@@ -1773,16 +1787,17 @@ class WeztermSessionProvider implements SessionProvider {
         for (const bin of ["wezterm", "wezterm-mux-server"]) {
           const wrapper = `#!/bin/bash\nexport LD_LIBRARY_PATH="${distDir}/lib:$LD_LIBRARY_PATH"\nexec "${distDir}/${bin}" "$@"\n`;
           await Bun.write(`${binDir}/${bin}`, wrapper);
-          Bun.spawnSync(["chmod", "+x", `${binDir}/${bin}`], {
-            timeout: 5_000,
-          });
+          if (process.platform !== "win32") {
+            Bun.spawnSync(["chmod", "+x", `${binDir}/${bin}`], {
+              timeout: 5_000,
+            });
+          }
         }
 
         // Cleanup
-        Bun.spawnSync(
-          ["rm", "-rf", "/tmp/wezterm.AppImage", "/tmp/squashfs-root"],
-          { timeout: 5_000 },
-        );
+        Bun.spawnSync(["rm", "-rf", appImagePath, squashRoot], {
+          timeout: 5_000,
+        });
 
         // Add to PATH for current process
         process.env.PATH = `${binDir}:${process.env.PATH}`;
