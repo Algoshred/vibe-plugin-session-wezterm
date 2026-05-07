@@ -94,7 +94,11 @@ jobs:
           NPMRC
           sed -i 's/^ *//' .npmrc
           bunx npm@latest version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
-          bunx npm@latest publish --registry "https://registry.npmjs.org/" --access public --ignore-scripts
+          if bunx npm@latest view "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}" version --registry "https://registry.npmjs.org/" >/dev/null 2>&1; then
+            echo "npmjs already has ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}; skipping"
+          else
+            bunx npm@latest publish --registry "https://registry.npmjs.org/" --access public --ignore-scripts
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPMJS_VIBECONTROLS_TOKEN }}
 
@@ -107,15 +111,23 @@ jobs:
           //verdaccio.tooling.internal.burdenoff.com/:_auth=${AUTH}
           NPMRC
           sed -i 's/^ *//' .npmrc
-          bunx npm@latest publish --registry "${VERDACCIO_URL}" --tag latest --access restricted --ignore-scripts
+          if bunx npm@latest view "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}" version --registry "${VERDACCIO_URL}" >/dev/null 2>&1; then
+            echo "Verdaccio already has ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}; skipping"
+          else
+            bunx npm@latest publish --registry "${VERDACCIO_URL}" --tag latest --access restricted --ignore-scripts
+          fi
 
       - name: Create git tag (if manual dispatch)
         if: github.event_name == 'workflow_dispatch'
         run: |
           git config --local user.email "ci@burdenoff.com"
           git config --local user.name "CI"
-          git tag "${{ steps.version.outputs.version }}" -m "Release ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}"
-          git push origin "${{ steps.version.outputs.version }}"
+          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.version.outputs.version }} already exists; skipping"
+          else
+            git tag "${{ steps.version.outputs.version }}" -m "Release ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}"
+            git push origin "${{ steps.version.outputs.version }}"
+          fi
 
       - name: Create GitHub Release
         env:
@@ -141,5 +153,5 @@ jobs:
         run: |
           echo "### Production Release" >> $GITHUB_STEP_SUMMARY
           echo "**Package**: \`${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**npmjs**: Published (public)" >> $GITHUB_STEP_SUMMARY
-          echo "**Verdaccio**: Published (private)" >> $GITHUB_STEP_SUMMARY
+          echo "**npmjs**: Published or already present (public)" >> $GITHUB_STEP_SUMMARY
+          echo "**Verdaccio**: Published or already present (private)" >> $GITHUB_STEP_SUMMARY

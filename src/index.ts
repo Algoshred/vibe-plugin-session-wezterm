@@ -174,6 +174,9 @@ interface HostStorage {
 }
 
 interface HostServices {
+  telemetry?: {
+    emit: (name: string, payload?: Record<string, unknown>) => void;
+  };
   logger: HostLogger;
   storage: HostStorage;
 }
@@ -182,7 +185,18 @@ interface HostServices {
 // VibePlugin interface
 // ---------------------------------------------------------------------------
 
+interface PluginCapabilities {
+  storage?: "none" | "read" | "rw";
+  secrets?: "none" | "read" | "rw";
+  gateway?: boolean;
+  broadcast?: boolean;
+  subprocess?: boolean;
+  audit?: boolean;
+  telemetry?: boolean;
+}
+
 interface VibePlugin {
+  capabilities?: PluginCapabilities;
   name: string;
   version: string;
   description: string;
@@ -2054,6 +2068,11 @@ class WeztermSessionProvider implements SessionProvider {
 const provider = new WeztermSessionProvider();
 
 const vibePlugin: VibePlugin = {
+  capabilities: {
+    storage: "rw",
+    subprocess: true,
+    telemetry: true,
+  },
   name: "session-wezterm",
   version: "2.3.0",
   description:
@@ -2065,6 +2084,7 @@ const vibePlugin: VibePlugin = {
   },
 
   async onServerStart(services: HostServices): Promise<void> {
+    services?.telemetry?.emit("session.provider.ready", { provider: "wezterm" });
     await provider.init(services);
   },
 
