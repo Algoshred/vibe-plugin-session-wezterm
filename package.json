@@ -1,6 +1,6 @@
 {
   "name": "@vibecontrols/vibe-plugin-session-wezterm",
-  "version": "2026.508.3",
+  "version": "2026.508.4",
   "type": "module",
   "main": "./dist/index.js",
   "description": "WezTerm + ttyd session provider plugin for VibeControls Agent",
@@ -40,7 +40,7 @@
   },
   "peerDependencies": {
     "@vibecontrols/agent": "2026.428.5",
-    "@vibecontrols/vibe-plugin-session-manager": "^2026.506.3"
+    "@vibecontrols/vibe-plugin-session-manager": "2026.508.4"
   },
   "peerDependenciesMeta": {
     "@vibecontrols/agent": {
