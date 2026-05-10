@@ -27,7 +27,7 @@
     "sanity": "bun run format:check && bun run lint:sanity && bun run type:check && bun run build"
   },
   "dependencies": {
-    "@vibecontrols/plugin-sdk": "2026.509.1"
+    "@vibecontrols/plugin-sdk": "2026.509.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
