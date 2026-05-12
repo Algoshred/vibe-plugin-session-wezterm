@@ -1,16 +1,15 @@
 version: 2
 registries:
-  burdenoff-verdaccio:
+  burdenoff-npmjs:
     type: "npm-registry"
-    url: "https://verdaccio.tooling.internal.burdenoff.com"
-    username: "ci-publisher"
-    password: "${{secrets.VERDACCIO_CI_PASSWORD}}"
+    url: "https://registry.npmjs.org"
+    token: "${{secrets.NPM_TOKEN}}"
     replaces-base: true
 updates:
   - package-ecosystem: "bun"
     directory: "/"
     registries:
-      - burdenoff-verdaccio
+      - burdenoff-npmjs
     schedule:
       interval: "weekly"
       day: "monday"

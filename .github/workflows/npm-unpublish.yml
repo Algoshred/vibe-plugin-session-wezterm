@@ -1,7 +1,7 @@
 # =============================================================================
 # Manual unpublish of @vibecontrols/vibe-plugin-session-wezterm versions from npmjs.
 # =============================================================================
-# Uses the same NPMJS_VIBECONTROLS_TOKEN granular token as release.yml.
+# Uses the same NPM_TOKEN granular token as release.yml.
 # Within the npm 72-hour unpublish window; after that, falls back to deprecate.
 # =============================================================================
 
@@ -34,7 +34,7 @@ jobs:
       - name: Configure npmjs auth
         run: |
           cat > ~/.npmrc <<EOF
-          //registry.npmjs.org/:_authToken=${{ secrets.NPMJS_VIBECONTROLS_TOKEN }}
+          //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}
           registry=https://registry.npmjs.org/
           EOF
           chmod 600 ~/.npmrc

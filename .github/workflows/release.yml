@@ -2,10 +2,10 @@
 #
 # Trigger: Manual workflow_dispatch or CalVer git tag push
 # Publishes to: https://www.npmjs.com/ (public)
-# Also publishes same version to Verdaccio (private, internal)
+# Also publishes same version to npmjs (private, internal)
 #
 # CalVer: YYYY.MDD.PATCH (semver-compatible, no zero-padding)
-# NPM token: NPMJS_VIBECONTROLS_TOKEN (granular token for @vibecontrols scope)
+# NPM token: NPM_TOKEN (granular token for @vibecontrols scope)
 
 name: Release
 
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   release:
-    name: Release to npmjs + Verdaccio
+    name: Release to npmjs
     runs-on: org-runners
     timeout-minutes: 10
     permissions:
@@ -100,21 +100,20 @@ jobs:
             bunx npm@latest publish --registry "https://registry.npmjs.org/" --access public --ignore-scripts
           fi
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPMJS_VIBECONTROLS_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish to Verdaccio (private)
+      - name: Publish to npmjs
         run: |
-          VERDACCIO_URL="https://verdaccio.tooling.internal.burdenoff.com/"
-          AUTH=$(echo -n "ci-publisher:${{ secrets.VERDACCIO_CI_PASSWORD }}" | base64)
           cat > .npmrc << NPMRC
-          registry=${VERDACCIO_URL}
-          //verdaccio.tooling.internal.burdenoff.com/:_auth=${AUTH}
+          //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
           NPMRC
           sed -i 's/^ *//' .npmrc
-          if bunx npm@latest view "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}" version --registry "${VERDACCIO_URL}" >/dev/null 2>&1; then
-            echo "Verdaccio already has ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}; skipping"
+          if bunx npm@latest view "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}" version  >/dev/null 2>&1; then
+            echo "npmjs already has ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}; skipping"
           else
-            bunx npm@latest publish --registry "${VERDACCIO_URL}" --tag latest --access restricted --ignore-scripts
+            bunx npm@latest publish --registry "https://registry.npmjs.org/" --tag latest --access public --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           fi
 
       - name: Create git tag (if manual dispatch)
@@ -154,4 +153,4 @@ jobs:
           echo "### Production Release" >> $GITHUB_STEP_SUMMARY
           echo "**Package**: \`${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**npmjs**: Published or already present (public)" >> $GITHUB_STEP_SUMMARY
-          echo "**Verdaccio**: Published or already present (private)" >> $GITHUB_STEP_SUMMARY
+

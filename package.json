@@ -69,8 +69,8 @@
   },
   "homepage": "https://vibecontrols.com",
   "publishConfig": {
-    "access": "restricted",
-    "registry": "https://verdaccio.tooling.internal.burdenoff.com/"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "files": [
     "dist/**/*",
