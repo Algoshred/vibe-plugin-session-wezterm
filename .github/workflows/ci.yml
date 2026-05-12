@@ -27,7 +27,7 @@ concurrency:
 jobs:
   test:
     name: Test & Build
-    runs-on: org-runners
+    runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
@@ -55,7 +55,7 @@ jobs:
     name: Publish to npmjs
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: org-runners
+    runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:

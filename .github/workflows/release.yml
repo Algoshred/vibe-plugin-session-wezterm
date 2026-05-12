@@ -27,7 +27,7 @@ concurrency:
 jobs:
   release:
     name: Release to npmjs
-    runs-on: org-runners
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
