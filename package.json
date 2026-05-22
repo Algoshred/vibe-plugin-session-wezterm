@@ -5,7 +5,7 @@
   "main": "./dist/index.js",
   "description": "WezTerm + ttyd session provider plugin for VibeControls Agent",
   "engines": {
-    "bun": ">=1.3.0"
+    "bun": ">=1.3.14"
   },
   "author": {
     "name": "Vignesh T.V",
