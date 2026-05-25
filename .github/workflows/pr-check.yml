@@ -15,12 +15,13 @@ jobs:
     steps:
       - name: Gate passed
         run: echo "All checks passed"
-  # ai-review-standard: v3
+  # ai-review-standard: v4
   claude-review:
     name: Claude Code Review
     needs: [pr-gate]
     if: github.event_name == 'pull_request' && needs.pr-gate.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -57,6 +58,7 @@ jobs:
     needs: [pr-gate]
     if: github.event_name == 'pull_request' && needs.pr-gate.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     env:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -95,6 +97,7 @@ jobs:
     needs: [pr-gate]
     if: github.event_name == 'pull_request' && needs.pr-gate.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     env:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -133,6 +136,7 @@ jobs:
     needs: [pr-gate]
     if: github.event_name == 'pull_request' && needs.pr-gate.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     env:
       OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
