@@ -15,3 +15,153 @@ jobs:
     steps:
       - name: Gate passed
         run: echo "All checks passed"
+  # ai-review-standard: v3
+  claude-review:
+    name: Claude Code Review
+    needs: [pr-gate]
+    if: github.event_name == 'pull_request' && needs.pr-gate.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          show_full_output: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request for code quality, bugs, security, performance, and test coverage.
+            Use the repository's CLAUDE.md / AGENTS.md for style and conventions when present.
+            Do not modify files. Only post GitHub comments.
+
+            Post exactly ONE top-level summary via `gh pr comment`. Begin it with this exact heading (first line):
+            **AI Review — Claude Opus 4.6** (`claude-opus-4-6`)
+
+            For each specific issue on a changed line, use `mcp__github_inline_comment__create_inline_comment` with `confirmed: true`.
+            Put finding details (tags, explanation) in inline comments; keep the summary brief (counts + highest-severity items).
+            Tag findings with [BUG], [SECURITY], [IMPROVEMENT], [BEST PRACTICE] and [LOW], [MEDIUM], or [HIGH].
+            If there are no meaningful issues, say "No issues found. Good job!" in the summary only.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr list:*)"
+            --model claude-opus-4-6
+
+  opencode-minimax-review:
+    name: OpenCode Review (Minimax M2.7)
+    needs: [pr-gate]
+    if: github.event_name == 'pull_request' && needs.pr-gate.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: OpenCode review (Minimax M2.7)
+        continue-on-error: true
+        uses: anomalyco/opencode/github@latest
+        with:
+          model: minimax/MiniMax-M2.7
+          use_github_token: true
+          share: false
+          prompt: |
+            Your entire response is posted as exactly ONE GitHub PR comment. Do not use tools to post comments.
+            Inline diff comments are not available for OpenCode; cite file paths and line numbers in the comment body.
+
+            Begin the comment with this exact heading (first line):
+            **AI Review — Minimax M2.7** (`minimax/MiniMax-M2.7`)
+
+            Review this pull request:
+            - Check for code quality issues
+            - Look for potential bugs and security issues
+            - Suggest improvements and best practices
+            - Don't modify any files
+            - Tag each finding with [BUG], [SECURITY], [IMPROVEMENT], [BEST PRACTICE] and [LOW], [MEDIUM], or [HIGH]
+            - If there are no issues, say "No issues found. Good job!"
+
+  opencode-ollama-review:
+    name: OpenCode Review (Ollama Qwen3.5)
+    needs: [pr-gate]
+    if: github.event_name == 'pull_request' && needs.pr-gate.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: OpenCode review (Ollama Qwen3.5)
+        continue-on-error: true
+        uses: anomalyco/opencode/github@latest
+        with:
+          model: ollama-cloud/qwen3.5:397b
+          use_github_token: true
+          share: false
+          prompt: |
+            Your entire response is posted as exactly ONE GitHub PR comment. Do not use tools to post comments.
+            Inline diff comments are not available for OpenCode; cite file paths and line numbers in the comment body.
+
+            Begin the comment with this exact heading (first line):
+            **AI Review — Ollama Qwen3.5** (`ollama-cloud/qwen3.5:397b`)
+
+            Review this pull request:
+            - Check for code quality issues
+            - Look for potential bugs and security issues
+            - Suggest improvements and best practices
+            - Don't modify any files
+            - Tag each finding with [BUG], [SECURITY], [IMPROVEMENT], [BEST PRACTICE] and [LOW], [MEDIUM], or [HIGH]
+            - If there are no issues, say "No issues found. Good job!"
+
+  opencode-go-review:
+    name: OpenCode Review (Deepseek v4 Pro)
+    needs: [pr-gate]
+    if: github.event_name == 'pull_request' && needs.pr-gate.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: OpenCode review (Deepseek v4 Pro)
+        continue-on-error: true
+        uses: anomalyco/opencode/github@latest
+        with:
+          model: opencode-go/deepseek-v4-pro
+          use_github_token: true
+          share: false
+          prompt: |
+            Your entire response is posted as exactly ONE GitHub PR comment. Do not use tools to post comments.
+            Inline diff comments are not available for OpenCode; cite file paths and line numbers in the comment body.
+
+            Begin the comment with this exact heading (first line):
+            **AI Review — Deepseek v4 Pro** (`opencode-go/deepseek-v4-pro`)
+
+            Review this pull request:
+            - Check for code quality issues
+            - Look for potential bugs and security issues
+            - Suggest improvements and best practices
+            - Don't modify any files
+            - Tag each finding with [BUG], [SECURITY], [IMPROVEMENT], [BEST PRACTICE] and [LOW], [MEDIUM], or [HIGH]
+            - If there are no issues, say "No issues found. Good job!"
