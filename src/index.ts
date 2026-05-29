@@ -1,5 +1,5 @@
 /**
- * @burdenoff/vibe-plugin-session-wezterm
+ * @vibecontrols/vibe-plugin-session-wezterm
  *
  * WezTerm + ttyd session provider plugin for VibeControls Agent.
  * Implements the full SessionProvider interface (23 methods + 8 aliases) using

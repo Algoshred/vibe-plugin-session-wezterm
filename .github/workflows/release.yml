@@ -119,7 +119,7 @@ jobs:
       - name: Create git tag (if manual dispatch)
         if: github.event_name == 'workflow_dispatch'
         run: |
-          git config --local user.email "ci@burdenoff.com"
+          git config --local user.email "oss@vibecontrols.com"
           git config --local user.name "CI"
           if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
             echo "Tag ${{ steps.version.outputs.version }} already exists; skipping"
