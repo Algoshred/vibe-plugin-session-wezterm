@@ -20,6 +20,12 @@ import type {
   VibePlugin,
   VibePluginFactory,
 } from "@vibecontrols/plugin-sdk/contract";
+import {
+  installBinary,
+  resolveBinary,
+  type BinaryDownload,
+  type ToolPlatform,
+} from "@vibecontrols/plugin-sdk/install";
 import { createLifecycleHooks } from "@vibecontrols/plugin-sdk/lifecycle";
 import { TypedStore } from "@vibecontrols/plugin-sdk/storage";
 import {
@@ -71,6 +77,12 @@ interface TerminalInfo {
   url: string;
   port: number;
   pid: number;
+  /** Host the ttyd terminal-server binds to (ttyd transport). */
+  host?: string;
+  /** WebSocket path ttyd serves the PTY stream on (ttyd transport). */
+  wsPath?: string;
+  /** WebSocket subprotocols ttyd negotiates (ttyd transport). */
+  subprotocols?: string[];
 }
 
 interface HealthCheckResult {
@@ -186,6 +198,45 @@ const STORAGE_KEY_SESSIONS = "sessions";
 const STORAGE_KEY_TERMINALS = "terminals";
 const TTYD_BASE_PORT = 7881;
 const TTYD_PORT_RANGE = 200;
+
+/**
+ * Official ttyd release assets per platform. The provider downloads the
+ * correct one into the agent's binary cache (~/.boff/vibecontrols/tools) via
+ * the SDK installer, so ttyd is owned + installed by THIS plugin — the thin
+ * agent never installs it. "latest" keeps users on a current build; once
+ * cached the binary is reused and resolved by ABSOLUTE PATH (immune to the
+ * PATH snapshot `Bun.which` takes at process start, which made a mid-run
+ * install invisible to the running daemon).
+ *
+ * ttyd ships NO static macOS binary — darwin-* is omitted so the /install
+ * handler falls back to a manual `brew install ttyd`.
+ */
+const TTYD_DOWNLOADS: Partial<Record<ToolPlatform, BinaryDownload>> = {
+  "linux-x64": {
+    url: "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64",
+    archive: "raw",
+  },
+  "linux-arm64": {
+    url: "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.aarch64",
+    archive: "raw",
+  },
+  "win32-x64": {
+    url: "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.win32.exe",
+    archive: "raw",
+  },
+};
+
+/**
+ * Resolve the ttyd binary path. Prefers the provider-managed cache (absolute
+ * path, immune to the `Bun.which` PATH snapshot), then the current PATH, then
+ * the bare name so the OS gives a sensible "command not found".
+ */
+function resolveTtydCmd(): string {
+  return (
+    resolveBinary("ttyd") ??
+    (process.platform === "win32" ? "ttyd.exe" : "ttyd")
+  );
+}
 
 // ---------------------------------------------------------------------------
 // WezTerm CLI list output shape
@@ -941,7 +992,7 @@ class WeztermSessionProvider implements SessionProvider {
 
     const child = Bun.spawn(
       [
-        "ttyd",
+        resolveTtydCmd(),
         "-t",
         "fontSize=14",
         "-t",
@@ -976,6 +1027,9 @@ class WeztermSessionProvider implements SessionProvider {
       url: `http://localhost:${assignedPort}`,
       port: assignedPort,
       pid: child.pid,
+      host: "127.0.0.1",
+      wsPath: "/ws",
+      subprotocols: ["tty"],
     };
 
     // Update session record with terminal info
@@ -1214,10 +1268,12 @@ class WeztermSessionProvider implements SessionProvider {
       // Ignore — zero sessions
     }
 
-    // Check ttyd availability via Bun.which (handles PATHEXT on Windows).
+    // Check ttyd availability via the provider-managed cache first (absolute
+    // path), falling back to PATH — resolveBinary is immune to the Bun.which
+    // PATH snapshot that hides a freshly-installed ttyd from the daemon.
     let ttydOk = false;
     try {
-      ttydOk = Bun.which("ttyd") !== null;
+      ttydOk = resolveBinary("ttyd") !== null;
     } catch {
       // ttyd not found
     }
@@ -1640,6 +1696,9 @@ class WeztermSessionProvider implements SessionProvider {
       url: `http://localhost:${port}`,
       port,
       pid,
+      host: "127.0.0.1",
+      wsPath: "/ws",
+      subprotocols: ["tty"],
     };
   }
 
@@ -2095,29 +2154,65 @@ function installWezterm(result: PrereqInstallResult): void {
 function createPrereqsRoutes() {
   return new Elysia({ prefix: "/prereqs" })
     .get("/status", () => {
-      const missing = whichSync("wezterm")
-        ? []
-        : [
-            {
-              name: "wezterm",
-              kind: "binary" as const,
-              requiresSudo: false,
-            },
-          ];
+      const missing: Array<{
+        name: string;
+        kind: "binary";
+        requiresSudo: boolean;
+      }> = [];
+      // wezterm is a manual install (no static download); ttyd is auto-resolved
+      // from the provider-managed cache (resolveBinary) or PATH.
+      if (!whichSync("wezterm")) {
+        missing.push({ name: "wezterm", kind: "binary", requiresSudo: false });
+      }
+      if (!resolveBinary("ttyd")) {
+        missing.push({ name: "ttyd", kind: "binary", requiresSudo: false });
+      }
       return { satisfied: missing.length === 0, missing };
     })
-    .post("/install", () => {
+    .post("/install", async () => {
       const result: PrereqInstallResult = {
         ok: true,
         installed: [],
         pendingSudo: [],
         errors: [],
       };
-      if (whichSync("wezterm")) {
-        return result;
+
+      // wezterm: manual install (no reliable static binary to download).
+      if (!whichSync("wezterm")) {
+        installWezterm(result);
       }
-      installWezterm(result);
-      result.ok = result.errors.length === 0;
+
+      // ttyd: auto-download into the agent binary cache (no sudo — the cache
+      // lives under the user's home dir). resolveBinary checks the cache +
+      // PATH; only download when truly absent.
+      if (!resolveBinary("ttyd")) {
+        try {
+          await installBinary({
+            name: "ttyd",
+            downloads: TTYD_DOWNLOADS,
+            versionMatcher: "ttyd version",
+          });
+          result.installed.push("ttyd");
+        } catch (err) {
+          // Auto-download failed (offline, unsupported arch, or macOS which
+          // has no static asset) — fall back to a manual instruction.
+          const manual =
+            process.platform === "darwin"
+              ? "brew install ttyd"
+              : process.platform === "win32"
+                ? "winget install ttyd    # or download from https://github.com/tsl0922/ttyd/releases"
+                : "see https://github.com/tsl0922/ttyd#installation";
+          result.pendingSudo.push({
+            name: "ttyd",
+            command: manual,
+            reason: `ttyd auto-download failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          });
+        }
+      }
+
+      result.ok = result.errors.length === 0 && result.pendingSudo.length === 0;
       return result;
     })
     .post("/uninstall", () => ({ ok: true }));
@@ -2186,6 +2281,11 @@ export const createPlugin: VibePluginFactory = (
     prerequisites: [
       {
         name: "wezterm",
+        kind: "binary",
+        requiresSudo: false,
+      },
+      {
+        name: "ttyd",
         kind: "binary",
         requiresSudo: false,
       },
