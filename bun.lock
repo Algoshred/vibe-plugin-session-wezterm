@@ -6,6 +6,7 @@
       "name": "@burdenoff/vibe-plugin-session-wezterm",
       "dependencies": {
         "@vibecontrols/plugin-sdk": "2026.509.2",
+        "elysia": "^1.4.28",
       },
       "devDependencies": {
         "@eslint/js": "^10.0.1",

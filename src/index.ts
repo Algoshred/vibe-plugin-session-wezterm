@@ -11,8 +11,9 @@
  */
 
 // Subprocess type not needed — we track PIDs only for restart resilience
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
+import { Elysia } from "elysia";
 import type {
   HostServices,
   ProfileContext,
@@ -826,9 +827,13 @@ class WeztermSessionProvider implements SessionProvider {
     // ttyd. Instead we start ttyd with a shell in the session's working
     // directory. The wezterm workspace tracks the session lifecycle while
     // ttyd provides the browser-accessible terminal.
-    const cwd = session.workingDirectory || process.env.HOME || "/";
-    const shell =
-      (session.metadata?.shell as string) || process.env.SHELL || "/bin/bash";
+    const cwd = session.workingDirectory || homedir();
+    // Default shell is platform-aware: Windows has no /bin/bash, so fall back
+    // to the comspec (cmd.exe) there and to $SHELL/bash on POSIX systems.
+    const defaultShell = isWindows()
+      ? process.env.ComSpec || "cmd.exe"
+      : process.env.SHELL || "/bin/bash";
+    const shell = (session.metadata?.shell as string) || defaultShell;
 
     // Build the ttyd shell environment.
     // Set wezterm-identifying vars, and if the agent itself is running inside
@@ -1889,6 +1894,158 @@ class WeztermSessionProvider implements SessionProvider {
  */
 const provider = new WeztermSessionProvider();
 
+// Cross-platform binary discovery via Bun.which (handles PATHEXT on Windows).
+// NOTE: Bun.which snapshots PATH at process start, so callers that need to
+// detect a freshly-installed binary MUST pass `{ PATH: process.env.PATH }`.
+function whichSync(bin: string): string | null {
+  return Bun.which(bin) ?? null;
+}
+
+// Re-check after an install: Bun.which caches the process-start PATH, so an
+// explicit PATH override is required to see binaries added during this run.
+function whichLive(bin: string): string | null {
+  return Bun.which(bin, { PATH: process.env.PATH }) ?? null;
+}
+
+interface PrereqInstallResult {
+  ok: boolean;
+  installed: string[];
+  pendingSudo: { name: string; command: string; reason: string }[];
+  errors: { name: string; message: string }[];
+}
+
+const WEZTERM_REASON = "wezterm is required for the WezTerm session backend.";
+
+/**
+ * Run a package-manager install command and report success only when the
+ * binary actually becomes resolvable afterwards. The manager binary itself
+ * is guarded by the caller via `Bun.which`.
+ */
+function runInstaller(command: string[]): boolean {
+  const result = Bun.spawnSync(command, {
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: 300_000,
+  });
+  return result.exitCode === 0;
+}
+
+/**
+ * Attempt to install wezterm without sudo on the current platform.
+ *
+ * - win32: winget → scoop → choco (all non-elevated user installs).
+ * - darwin: `brew install --cask wezterm`.
+ * - linux: no non-sudo path is attempted inline; the caller returns a
+ *   `pendingSudo` entry instead so the agent can surface the command.
+ *
+ * Returns `true` when wezterm is resolvable after the attempt.
+ */
+function installWezterm(result: PrereqInstallResult): void {
+  const platform = process.platform;
+
+  if (platform === "win32") {
+    if (whichSync("winget")) {
+      runInstaller([
+        "winget",
+        "install",
+        "--id",
+        "wez.wezterm",
+        "-e",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+      ]);
+      if (whichLive("wezterm")) {
+        result.installed.push("wezterm");
+        return;
+      }
+    }
+    if (whichSync("scoop")) {
+      runInstaller(["scoop", "bucket", "add", "extras"]);
+      runInstaller(["scoop", "install", "wezterm"]);
+      if (whichLive("wezterm")) {
+        result.installed.push("wezterm");
+        return;
+      }
+    }
+    if (whichSync("choco")) {
+      runInstaller(["choco", "install", "wezterm", "-y"]);
+      if (whichLive("wezterm")) {
+        result.installed.push("wezterm");
+        return;
+      }
+    }
+    result.errors.push({
+      name: "wezterm",
+      message:
+        "Could not auto-install wezterm — no usable winget/scoop/choco found or the install failed. " +
+        "Install manually: https://wezfurlong.org/wezterm/install/windows.html",
+    });
+    return;
+  }
+
+  if (platform === "darwin") {
+    if (whichSync("brew")) {
+      runInstaller(["brew", "install", "--cask", "wezterm"]);
+      if (whichLive("wezterm")) {
+        result.installed.push("wezterm");
+        return;
+      }
+    }
+    result.errors.push({
+      name: "wezterm",
+      message:
+        "Could not auto-install wezterm via Homebrew. " +
+        "Install Homebrew (https://brew.sh) then run `brew install --cask wezterm`, " +
+        "or follow https://wezfurlong.org/wezterm/install/macos.html",
+    });
+    return;
+  }
+
+  // linux (and any other POSIX) — do not run sudo inline; surface a command.
+  result.pendingSudo.push({
+    name: "wezterm",
+    command:
+      "Install wezterm from your distro package manager or the official " +
+      "repository — see https://wezfurlong.org/wezterm/install/linux.html",
+    reason: WEZTERM_REASON,
+  });
+}
+
+/**
+ * Prereqs router — this plugin OWNS installing the `wezterm` binary so the
+ * agent never has to. Shape matches the agent's prereqs protocol.
+ */
+function createPrereqsRoutes() {
+  return new Elysia({ prefix: "/prereqs" })
+    .get("/status", () => {
+      const missing = whichSync("wezterm")
+        ? []
+        : [
+            {
+              name: "wezterm",
+              kind: "binary" as const,
+              requiresSudo: false,
+            },
+          ];
+      return { satisfied: missing.length === 0, missing };
+    })
+    .post("/install", () => {
+      const result: PrereqInstallResult = {
+        ok: true,
+        installed: [],
+        pendingSudo: [],
+        errors: [],
+      };
+      if (whichSync("wezterm")) {
+        return result;
+      }
+      installWezterm(result);
+      result.ok = result.errors.length === 0;
+      return result;
+    })
+    .post("/uninstall", () => ({ ok: true }));
+}
+
 /**
  * Plugin contract V2 factory. Builds a fresh VibePlugin (with its own
  * lifecycle/telemetry instances) per call. The `provider` module-level
@@ -1898,11 +2055,12 @@ export const createPlugin: VibePluginFactory = (
   _ctx: ProfileContext,
 ): VibePlugin => {
   // Lifecycle hooks via SDK — auto-emits `<plugin>.ready` telemetry,
-  // skips init on Windows (wezterm-mux-server is best-run under WSL2),
-  // delegates to provider.
+  // delegates to provider. WezTerm ships official Windows builds with a
+  // native multiplexer, so this plugin is the default Windows session
+  // backend and initializes on every platform (no skipped platforms).
   const lifecycle = createLifecycleHooks({
     name: PLUGIN_NAME,
-    skipPlatforms: ["win32"],
+    skipPlatforms: [],
     telemetryEventName: `${PLUGIN_NAME}.ready`,
     onInit: async (services: HostServices) => {
       new ProviderRegistry(services).registerProvider(
@@ -1932,7 +2090,17 @@ export const createPlugin: VibePluginFactory = (
     description:
       "WezTerm + ttyd session provider — manages terminal sessions via WezTerm workspaces and exposes web terminals via ttyd",
     tags: ["backend", "provider"],
+    apiPrefix: "/api/session-wezterm",
 
+    prerequisites: [
+      {
+        name: "wezterm",
+        kind: "binary",
+        requiresSudo: false,
+      },
+    ],
+
+    createRoutes: () => createPrereqsRoutes(),
     onServerStart: lifecycle.onServerStart,
     onServerStop: lifecycle.onServerStop,
   };
