@@ -392,6 +392,83 @@ class WeztermSessionProvider implements SessionProvider {
     this.log.info("WeztermSessionProvider shutdown complete");
   }
 
+  /**
+   * Full teardown for `vibe nuke`. Force-reaps every ttyd terminal-server and
+   * wezterm `vibe-*` workspace this plugin spawned, then clears the plugin's
+   * persisted storage namespace (both the sessions and terminals keys).
+   *
+   * Unlike `shutdown({ reason: "reload" })` this NEVER preserves processes —
+   * a nuke is a complete teardown, not a hot reload. Best-effort throughout:
+   * a failure reaping one resource must not abort reaping the rest.
+   *
+   * @returns the human-readable labels of what was reaped.
+   */
+  async nuke(): Promise<string[]> {
+    this.log.info("WeztermSessionProvider nuke — reaping all spawned resources");
+    const reaped: string[] = [];
+
+    // 1. Stop every ttyd terminal-server we spawned (graceful then forced).
+    const sessionIds = [...this.ttydPids.keys()];
+    const stopPromises = sessionIds.map((sessionId) =>
+      this.stopTerminal(sessionId),
+    );
+    const results = await Promise.allSettled(stopPromises);
+    const ttydKilled = results.filter((r) => r.status === "fulfilled").length;
+    if (ttydKilled > 0) {
+      reaped.push(`${ttydKilled} ttyd terminal-server(s)`);
+    }
+
+    // 2. Kill the wezterm panes for every `vibe-*` workspace this plugin owns.
+    //    Match against persisted sessions so we only reap workspaces we created.
+    let panesKilled = 0;
+    let workspacesKilled = 0;
+    try {
+      const sessions = await this.loadSessions();
+      const ownedWorkspaces = new Set(
+        sessions.map((s) => this.getWorkspaceName(s)),
+      );
+      const panes = weztermListPanes();
+      for (const workspace of ownedWorkspaces) {
+        const wsPanes = panes.filter((p) => p.workspace === workspace);
+        if (wsPanes.length === 0) continue;
+        let killedAny = false;
+        for (const pane of wsPanes) {
+          if (
+            weztermCliExecSilent(["kill-pane", "--pane-id", String(pane.pane_id)])
+          ) {
+            panesKilled++;
+            killedAny = true;
+          }
+        }
+        if (killedAny) workspacesKilled++;
+      }
+    } catch (err) {
+      this.log.warn("nuke: failed to reap wezterm panes", {
+        error: String(err),
+      });
+    }
+    if (workspacesKilled > 0) {
+      reaped.push(
+        `${panesKilled} wezterm pane(s) across ${workspacesKilled} workspace(s)`,
+      );
+    }
+
+    // 3. Clear the plugin's persisted storage namespace.
+    try {
+      await this.sessionsStore?.delete();
+      await this.terminalsStore?.delete();
+      reaped.push("session-wezterm storage");
+    } catch (err) {
+      this.log.warn("nuke: failed to clear storage", { error: String(err) });
+    }
+
+    this.ttydPids.clear();
+    this.ttydPorts.clear();
+
+    this.log.info("WeztermSessionProvider nuke complete", { reaped });
+    return reaped;
+  }
+
   // -----------------------------------------------------------------------
   // SessionProvider — create / terminate / getInfo / list
   // -----------------------------------------------------------------------
@@ -2077,6 +2154,20 @@ export const createPlugin: VibePluginFactory = (
     onShutdown: async () => {
       await provider.shutdown({ reason: "shutdown" });
     },
+    // `vibe nuke` runs this while the daemon is still up, so the provider
+    // singleton + its in-memory ttyd PID map are reachable. Force-reap every
+    // ttyd terminal-server and wezterm `vibe-*` workspace this plugin spawned
+    // and wipe its storage. The agent never names ttyd or wezterm — that
+    // provider knowledge lives here.
+    onNuke: async (_hostServices, ctx) => {
+      if (ctx.dryRun) {
+        return {
+          reaped: ["ttyd terminal-servers + wezterm workspaces + storage"],
+        };
+      }
+      const reaped = await provider.nuke();
+      return { reaped };
+    },
   });
 
   const plugin: VibePlugin = {
@@ -2103,6 +2194,7 @@ export const createPlugin: VibePluginFactory = (
     createRoutes: () => createPrereqsRoutes(),
     onServerStart: lifecycle.onServerStart,
     onServerStop: lifecycle.onServerStop,
+    onNuke: lifecycle.onNuke,
   };
 
   return plugin;
