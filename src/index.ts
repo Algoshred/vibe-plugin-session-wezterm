@@ -11,7 +11,8 @@
  */
 
 // Subprocess type not needed — we track PIDs only for restart resilience
-import { homedir, tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join as joinPath } from "node:path";
 import { Elysia } from "elysia";
 import type {
@@ -279,10 +280,71 @@ function isWindows(): boolean {
 }
 
 /**
+ * Well-known directories a wezterm install (winget / scoop / choco / brew /
+ * AppImage wrapper) drops its binaries into, in priority order. Used to resolve
+ * wezterm by ABSOLUTE PATH so a binary installed DURING this run is found even
+ * though `Bun.which` snapshotted the process-start PATH (the classic Windows
+ * "winget installed it but it's not on PATH until restart" trap).
+ */
+function weztermInstallDirs(): string[] {
+  const home = process.env.HOME || process.env.USERPROFILE || homedir();
+  if (process.platform === "win32") {
+    const localApp =
+      process.env.LOCALAPPDATA || joinPath(home, "AppData", "Local");
+    const progFiles = process.env.ProgramFiles || "C:\\Program Files";
+    return [
+      joinPath(localApp, "Programs", "WezTerm"),
+      joinPath(progFiles, "WezTerm"),
+      joinPath(home, "scoop", "shims"),
+      joinPath(home, "scoop", "apps", "wezterm", "current"),
+      "C:\\ProgramData\\chocolatey\\bin",
+    ];
+  }
+  if (process.platform === "darwin") {
+    return [
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      "/Applications/WezTerm.app/Contents/MacOS",
+    ];
+  }
+  return [joinPath(home, "bin"), "/usr/local/bin", "/usr/bin"];
+}
+
+// Cache the resolved absolute path for each wezterm tool once found, so we
+// don't re-probe the filesystem on every exec. Only successful resolutions are
+// cached — a miss stays unmemoised so a later install is picked up.
+const weztermToolPathCache = new Map<string, string>();
+
+/**
+ * Resolve a wezterm tool ("wezterm" / "wezterm-mux-server") to a runnable path.
+ * Prefers a live PATH lookup (honours the CURRENT, possibly-augmented PATH),
+ * then probes the known install dirs by absolute path, and finally falls back
+ * to the bare name so spawn surfaces a meaningful ENOENT if truly absent.
+ */
+function resolveWeztermTool(name: string): string {
+  const cached = weztermToolPathCache.get(name);
+  if (cached) return cached;
+  const live = whichLive(name);
+  if (live) {
+    weztermToolPathCache.set(name, live);
+    return live;
+  }
+  const exe = process.platform === "win32" ? `${name}.exe` : name;
+  for (const dir of weztermInstallDirs()) {
+    const candidate = joinPath(dir, exe);
+    if (existsSync(candidate)) {
+      weztermToolPathCache.set(name, candidate);
+      return candidate;
+    }
+  }
+  return name;
+}
+
+/**
  * Execute a wezterm command and return its stdout. Throws on non-zero exit.
  */
 function weztermExec(args: string[]): string {
-  const result = Bun.spawnSync(["wezterm", ...args], {
+  const result = Bun.spawnSync([resolveWeztermTool("wezterm"), ...args], {
     stdout: "pipe",
     stderr: "pipe",
     timeout: 10_000,
@@ -300,7 +362,7 @@ function weztermExec(args: string[]): string {
  */
 function weztermExecSilent(args: string[]): boolean {
   try {
-    const result = Bun.spawnSync(["wezterm", ...args], {
+    const result = Bun.spawnSync([resolveWeztermTool("wezterm"), ...args], {
       stdout: "pipe",
       stderr: "pipe",
       timeout: 10_000,
@@ -1767,103 +1829,56 @@ class WeztermSessionProvider implements SessionProvider {
       this.log.info("wezterm not found — attempting auto-install");
     }
 
-    const platform = process.platform;
-    const homeDir = process.env.HOME || process.env.USERPROFILE || tmpdir();
-
     try {
-      if (platform === "linux") {
-        // Download AppImage, extract, create wrapper scripts. Use tmpdir()
-        // (honours TMPDIR) instead of hardcoded /tmp so installs work in
-        // sandboxed environments where /tmp is read-only.
-        const binDir = `${homeDir}/bin`;
-        const distDir = `${binDir}/wezterm-dist`;
-        const tmpRoot = tmpdir();
-        const appImagePath = joinPath(tmpRoot, "wezterm.AppImage");
-        const squashRoot = joinPath(tmpRoot, "squashfs-root");
-        Bun.spawnSync(["mkdir", "-p", binDir], { timeout: 5_000 });
-
-        const appImageUrl =
-          "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-20240203-110809-5046fc22-Ubuntu20.04.AppImage";
-        this.log.info("Downloading WezTerm AppImage...");
-        const dl = Bun.spawnSync(
-          ["curl", "-sL", appImageUrl, "-o", appImagePath],
-          { timeout: 120_000, stdout: "pipe", stderr: "pipe" },
-        );
-        if (dl.exitCode !== 0)
-          throw new Error(`Download failed: ${dl.stderr.toString()}`);
-
-        // chmod +x is meaningless on Windows (no POSIX execute bit), but
-        // this entire branch is gated by `platform === "linux"`. Still, we
-        // keep the call platform-defensive in case of future refactors.
-        if (process.platform !== "win32") {
-          Bun.spawnSync(["chmod", "+x", appImagePath], { timeout: 5_000 });
+      // Delegate to the SAME package-manager installer the /prereqs route uses
+      // (winget → scoop → choco on Windows; brew on macOS; pendingSudo command
+      // on Linux). The previous hand-rolled per-platform logic here was broken
+      // on Windows: it shelled a PowerShell `-Command` that referenced
+      // `'$env:TEMP\wezterm.zip'` inside SINGLE quotes, so `$env:TEMP` never
+      // expanded → PowerShell parsed `$env` as a drive → "Cannot find drive...".
+      // It also joined the install dir onto PATH with ":" (POSIX) on Windows.
+      const result: PrereqInstallResult = {
+        ok: true,
+        installed: [],
+        pendingSudo: [],
+        errors: [],
+      };
+      installWezterm(result);
+      if (result.pendingSudo.length > 0) {
+        for (const ps of result.pendingSudo) {
+          this.log.info(`wezterm needs a manual install step: ${ps.command}`);
         }
-
-        // Extract (no FUSE needed)
-        Bun.spawnSync(
-          [
-            "sh",
-            "-c",
-            `cd ${tmpRoot} && ./wezterm.AppImage --appimage-extract`,
-          ],
-          { timeout: 30_000, stdout: "pipe", stderr: "pipe" },
+      }
+      if (result.errors.length > 0) {
+        // Log but don't hard-fail yet — a winget/scoop install can succeed even
+        // when its post-install PATH check (Bun.which's startup snapshot) can't
+        // see the new binary. The absolute-path verify below is the real test.
+        this.log.warn(
+          `wezterm installer reported: ${result.errors.map((e) => e.message).join("; ")}`,
         );
-
-        // Copy binaries
-        Bun.spawnSync(["mkdir", "-p", distDir], { timeout: 5_000 });
-        Bun.spawnSync(
-          [
-            "sh",
-            "-c",
-            `cp ${squashRoot}/usr/bin/* ${distDir}/ && cp -r ${squashRoot}/usr/lib ${distDir}/lib 2>/dev/null; true`,
-          ],
-          { timeout: 10_000, stdout: "pipe", stderr: "pipe" },
-        );
-
-        // Create wrapper scripts with LD_LIBRARY_PATH
-        for (const bin of ["wezterm", "wezterm-mux-server"]) {
-          const wrapper = `#!/bin/bash\nexport LD_LIBRARY_PATH="${distDir}/lib:$LD_LIBRARY_PATH"\nexec "${distDir}/${bin}" "$@"\n`;
-          await Bun.write(`${binDir}/${bin}`, wrapper);
-          if (process.platform !== "win32") {
-            Bun.spawnSync(["chmod", "+x", `${binDir}/${bin}`], {
-              timeout: 5_000,
-            });
-          }
-        }
-
-        // Cleanup
-        Bun.spawnSync(["rm", "-rf", appImagePath, squashRoot], {
-          timeout: 5_000,
-        });
-
-        // Add to PATH for current process
-        process.env.PATH = `${binDir}:${process.env.PATH}`;
-      } else if (platform === "darwin") {
-        const r = Bun.spawnSync(["brew", "install", "--cask", "wezterm"], {
-          timeout: 120_000,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        if (r.exitCode !== 0) throw new Error(r.stderr.toString());
-      } else if (platform === "win32") {
-        const localApps =
-          process.env.LOCALAPPDATA || `${homeDir}/AppData/Local`;
-        const installDir = `${localApps}/Programs/WezTerm`;
-        const zipUrl =
-          "https://github.com/wezterm/wezterm/releases/download/20240203-110809-5046fc22/WezTerm-windows-20240203-110809-5046fc22.zip";
-        const ps = Bun.spawnSync(
-          [
-            "powershell",
-            "-Command",
-            `New-Item -ItemType Directory -Force -Path '${installDir}'; Invoke-WebRequest -Uri '${zipUrl}' -OutFile '$env:TEMP\\wezterm.zip'; Expand-Archive -Force '$env:TEMP\\wezterm.zip' -DestinationPath '${installDir}'; Remove-Item '$env:TEMP\\wezterm.zip'`,
-          ],
-          { timeout: 120_000, stdout: "pipe", stderr: "pipe" },
-        );
-        if (ps.exitCode !== 0) throw new Error(ps.stderr.toString());
-        process.env.PATH = `${installDir}:${process.env.PATH}`;
       }
 
-      // Verify
+      // A freshly-installed wezterm typically isn't on this process's PATH
+      // snapshot yet. Drop the resolution cache so the verify re-probes the
+      // known install dirs and resolves the binary by absolute path.
+      weztermToolPathCache.delete("wezterm");
+      const resolved = resolveWeztermTool("wezterm");
+      if (resolved !== "wezterm" || whichLive("wezterm")) {
+        // Make the resolved dir available to bare-name spawns elsewhere too.
+        const dir =
+          resolved.includes("/") || resolved.includes("\\")
+            ? joinPath(resolved, "..")
+            : null;
+        if (dir) {
+          const sep = process.platform === "win32" ? ";" : ":";
+          const parts = (process.env.PATH || "").split(sep);
+          if (!parts.includes(dir)) {
+            process.env.PATH = [dir, ...parts].join(sep);
+          }
+        }
+      }
+
+      // Verify by actually invoking wezterm (resolves via the augmented path).
       const version = weztermExec(["--version"]);
       this.log.info("wezterm auto-installed successfully", {
         version: version.trim(),
@@ -1895,11 +1910,14 @@ class WeztermSessionProvider implements SessionProvider {
 
     try {
       const daemonizeFlag = isWindows() ? [] : ["--daemonize"];
-      Bun.spawnSync(["wezterm-mux-server", ...daemonizeFlag], {
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: 10_000,
-      });
+      Bun.spawnSync(
+        [resolveWeztermTool("wezterm-mux-server"), ...daemonizeFlag],
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 10_000,
+        },
+      );
 
       // Wait for the mux server to be ready
       let ready = false;
