@@ -112,9 +112,9 @@ jobs:
             echo "npmjs already has ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}; skipping"
           else
             bunx npm@latest publish --registry "https://registry.npmjs.org/" --tag latest --access public --ignore-scripts
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          fi
 
       - name: Create git tag (if manual dispatch)
         if: github.event_name == 'workflow_dispatch'
@@ -153,4 +153,3 @@ jobs:
           echo "### Production Release" >> $GITHUB_STEP_SUMMARY
           echo "**Package**: \`${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**npmjs**: Published or already present (public)" >> $GITHUB_STEP_SUMMARY
-

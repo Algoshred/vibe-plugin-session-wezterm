@@ -11,9 +11,11 @@
  */
 
 // Subprocess type not needed — we track PIDs only for restart resilience
-import { existsSync } from "node:fs";
+import { spawn as spawnChild } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join as joinPath } from "node:path";
+import { dirname, join as joinPath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Elysia } from "elysia";
 import type {
   HostServices,
@@ -192,7 +194,8 @@ interface SessionProviderCapabilities {
 // ---------------------------------------------------------------------------
 
 const PLUGIN_NAME = "session-wezterm";
-const PLUGIN_VERSION = "2026.509.3";
+const PLUGIN_PACKAGE_NAME = "@vibecontrols/vibe-plugin-session-wezterm";
+const PLUGIN_VERSION = getPluginVersion();
 const PROVIDER_NAME = "session-wezterm";
 const STORAGE_NAMESPACE = "session-wezterm";
 const STORAGE_KEY_SESSIONS = "sessions";
@@ -279,6 +282,35 @@ function isWindows(): boolean {
   return process.platform === "win32";
 }
 
+function getPluginVersion(): string {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 10 && dir && dir !== dirname(dir); i++) {
+      const pkgPath = joinPath(dir, "package.json");
+      if (existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+            name?: string;
+            version?: string;
+          };
+          if (
+            pkg.name === PLUGIN_PACKAGE_NAME &&
+            typeof pkg.version === "string"
+          ) {
+            return pkg.version;
+          }
+        } catch {
+          /* malformed package.json — keep walking up */
+        }
+      }
+      dir = dirname(dir);
+    }
+  } catch {
+    /* fall through */
+  }
+  return "0.0.0";
+}
+
 /**
  * Well-known directories a wezterm install (winget / scoop / choco / brew /
  * AppImage wrapper) drops its binaries into, in priority order. Used to resolve
@@ -338,6 +370,49 @@ function resolveWeztermTool(name: string): string {
     }
   }
   return name;
+}
+
+function weztermToolResolvable(name: string): boolean {
+  const resolved = resolveWeztermTool(name);
+  return resolved !== name || whichLive(name) !== null;
+}
+
+function quoteCmdArg(arg: string): string {
+  if (/^[A-Za-z0-9_./:=+-]+$/.test(arg)) return arg;
+  return `"${arg.replace(/"/g, '""')}"`;
+}
+
+function normalizeWindowsCommand(command: string[]): string[] {
+  if (process.platform !== "win32") return command;
+  const [cmd, ...args] = command;
+  if (!cmd) return command;
+  if (!/\.(cmd|bat)$/i.test(cmd)) return command;
+  return [
+    "cmd.exe",
+    "/d",
+    "/s",
+    "/c",
+    [cmd, ...args].map(quoteCmdArg).join(" "),
+  ];
+}
+
+function buildEnvAssignmentCommand(
+  key: string,
+  value: string,
+  shell?: string,
+): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new Error(`Invalid environment variable name: ${key}`);
+  }
+  if (!isWindows()) {
+    return `export ${key}='${value.replace(/'/g, "'\\''")}'\n`;
+  }
+
+  const shellName = (shell ?? "").toLowerCase();
+  if (shellName.includes("powershell") || shellName.includes("pwsh")) {
+    return `$env:${key} = '${value.replace(/'/g, "''")}'\r\n`;
+  }
+  return `set "${key}=${value.replace(/"/g, '""')}"\r\n`;
 }
 
 /**
@@ -662,18 +737,19 @@ class WeztermSessionProvider implements SessionProvider {
       );
     }
 
-    // Apply environment variables by sending export commands
-    // (wezterm has no post-spawn set-environment, so we send export commands)
+    // Apply environment variables by sending shell-native assignment commands.
+    // WezTerm has no post-spawn set-environment hook, so this mirrors tmux by
+    // injecting commands into the pane after creation.
     if (config.environment) {
       for (const [key, value] of Object.entries(config.environment)) {
-        const escaped = value.replace(/'/g, "'\\''");
+        const assignment = buildEnvAssignmentCommand(key, value, config.shell);
         weztermCliExecSilent([
           "send-text",
           "--pane-id",
           String(paneId),
           "--no-paste",
           "--",
-          `export ${key}='${escaped}'\n`,
+          assignment,
         ]);
       }
       // Small delay for environment to settle
@@ -1887,8 +1963,9 @@ class WeztermSessionProvider implements SessionProvider {
       this.log.error("Failed to auto-install wezterm", {
         error: String(err),
       });
-      this.log.error(
-        "wezterm is not available — session provider will not function",
+      throw new Error(
+        "wezterm is not available; install WezTerm and restart the agent",
+        { cause: err },
       );
     }
   }
@@ -1909,15 +1986,33 @@ class WeztermSessionProvider implements SessionProvider {
     );
 
     try {
-      const daemonizeFlag = isWindows() ? [] : ["--daemonize"];
-      Bun.spawnSync(
-        [resolveWeztermTool("wezterm-mux-server"), ...daemonizeFlag],
-        {
+      if (!weztermToolResolvable("wezterm-mux-server")) {
+        throw new Error("Executable not found in PATH: wezterm-mux-server");
+      }
+
+      const muxServer = resolveWeztermTool("wezterm-mux-server");
+      if (isWindows()) {
+        const child = spawnChild(muxServer, [], {
+          detached: true,
+          windowsHide: true,
+          stdio: "ignore",
+        });
+        child.on("error", (error) => {
+          this.log.error("wezterm-mux-server process error", {
+            error: String(error),
+          });
+        });
+        child.unref();
+      } else {
+        const result = Bun.spawnSync([muxServer, "--daemonize"], {
           stdout: "pipe",
           stderr: "pipe",
           timeout: 10_000,
-        },
-      );
+        });
+        if (result.exitCode !== 0) {
+          throw new Error(result.stderr.toString().trim() || "non-zero exit");
+        }
+      }
 
       // Wait for the mux server to be ready
       let ready = false;
@@ -1932,12 +2027,13 @@ class WeztermSessionProvider implements SessionProvider {
       if (ready) {
         this.log.info("wezterm-mux-server started successfully");
       } else {
-        this.log.error("wezterm-mux-server started but not responding to CLI");
+        throw new Error("wezterm-mux-server started but not responding to CLI");
       }
     } catch (err) {
       this.log.error("Failed to start wezterm-mux-server", {
         error: String(err),
       });
+      throw err;
     }
   }
 
@@ -2121,12 +2217,17 @@ const WEZTERM_REASON = "wezterm is required for the WezTerm session backend.";
  * is guarded by the caller via `Bun.which`.
  */
 function runInstaller(command: string[]): boolean {
-  const result = Bun.spawnSync(command, {
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: 300_000,
-  });
-  return result.exitCode === 0;
+  try {
+    const result = Bun.spawnSync(normalizeWindowsCommand(command), {
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 300_000,
+      env: process.env as Record<string, string>,
+    });
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2187,14 +2288,17 @@ function installWezterm(result: PrereqInstallResult): void {
   const platform = process.platform;
 
   if (platform === "win32") {
-    const winget = resolvePkgManager("winget");
-    if (winget) {
+    for (const winget of [resolvePkgManager("winget"), "winget"].filter(
+      (v): v is string => typeof v === "string" && v.length > 0,
+    )) {
       runInstaller([
         winget,
         "install",
         "--id",
         "wez.wezterm",
         "-e",
+        "--silent",
+        "--disable-interactivity",
         "--accept-source-agreements",
         "--accept-package-agreements",
       ]);
@@ -2203,8 +2307,9 @@ function installWezterm(result: PrereqInstallResult): void {
         return;
       }
     }
-    const scoop = resolvePkgManager("scoop");
-    if (scoop) {
+    for (const scoop of [resolvePkgManager("scoop"), "scoop"].filter(
+      (v): v is string => typeof v === "string" && v.length > 0,
+    )) {
       runInstaller([scoop, "bucket", "add", "extras"]);
       runInstaller([scoop, "install", "wezterm"]);
       if (weztermResolvable()) {
@@ -2212,9 +2317,10 @@ function installWezterm(result: PrereqInstallResult): void {
         return;
       }
     }
-    const choco = resolvePkgManager("choco");
-    if (choco) {
-      runInstaller([choco, "install", "wezterm", "-y"]);
+    for (const choco of [resolvePkgManager("choco"), "choco"].filter(
+      (v): v is string => typeof v === "string" && v.length > 0,
+    )) {
+      runInstaller([choco, "install", "wezterm", "-y", "--no-progress"]);
       if (weztermResolvable()) {
         result.installed.push("wezterm");
         return;
@@ -2349,6 +2455,7 @@ export const createPlugin: VibePluginFactory = (
     skipPlatforms: [],
     telemetryEventName: `${PLUGIN_NAME}.ready`,
     onInit: async (services: HostServices) => {
+      await provider.init(services);
       new ProviderRegistry(services).registerProvider(
         "session",
         PROVIDER_NAME,
@@ -2358,7 +2465,6 @@ export const createPlugin: VibePluginFactory = (
         "session.provider.ready",
         { provider: "wezterm" },
       );
-      await provider.init(services);
     },
     onShutdown: async () => {
       await provider.shutdown({ reason: "shutdown" });

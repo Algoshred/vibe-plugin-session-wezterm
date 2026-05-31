@@ -41,8 +41,8 @@
     "typescript-eslint": "^8.56.0"
   },
   "peerDependencies": {
-    "@vibecontrols/agent": "2026.428.5",
-    "@vibecontrols/vibe-plugin-session-manager": "2026.509.1"
+    "@vibecontrols/agent": ">=2026.529.13",
+    "@vibecontrols/vibe-plugin-session-manager": ">=2026.531.1"
   },
   "peerDependenciesMeta": {
     "@vibecontrols/agent": {
