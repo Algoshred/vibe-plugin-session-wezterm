@@ -2100,14 +2100,8 @@ class WeztermSessionProvider implements SessionProvider {
 const provider = new WeztermSessionProvider();
 
 // Cross-platform binary discovery via Bun.which (handles PATHEXT on Windows).
-// NOTE: Bun.which snapshots PATH at process start, so callers that need to
-// detect a freshly-installed binary MUST pass `{ PATH: process.env.PATH }`.
-function whichSync(bin: string): string | null {
-  return Bun.which(bin) ?? null;
-}
-
-// Re-check after an install: Bun.which caches the process-start PATH, so an
-// explicit PATH override is required to see binaries added during this run.
+// Bun.which snapshots PATH at process start, so we ALWAYS pass the current
+// `{ PATH: process.env.PATH }` to detect binaries installed during this run.
 function whichLive(bin: string): string | null {
   return Bun.which(bin, { PATH: process.env.PATH }) ?? null;
 }
@@ -2145,13 +2139,58 @@ function runInstaller(command: string[]): boolean {
  *
  * Returns `true` when wezterm is resolvable after the attempt.
  */
+/**
+ * Resolve a package manager (winget / scoop / choco / brew) to a runnable path.
+ * Uses a LIVE PATH lookup first, then probes the well-known install locations —
+ * the daemon is launched detached with a reduced PATH snapshot, so `Bun.which`
+ * frequently can't see winget even though it's installed (which is exactly why
+ * auto-install reported "no usable winget/scoop/choco found"). Returns null if
+ * genuinely absent.
+ */
+function resolvePkgManager(name: string): string | null {
+  const live = whichLive(name);
+  if (live) return live;
+  const home = process.env.HOME || process.env.USERPROFILE || homedir();
+  if (process.platform === "win32") {
+    const localApp =
+      process.env.LOCALAPPDATA || joinPath(home, "AppData", "Local");
+    const choco =
+      process.env.ChocolateyInstall || "C:\\ProgramData\\chocolatey";
+    const known: Record<string, string[]> = {
+      winget: [joinPath(localApp, "Microsoft", "WindowsApps", "winget.exe")],
+      scoop: [joinPath(home, "scoop", "shims", "scoop.cmd")],
+      choco: [joinPath(choco, "bin", "choco.exe")],
+    };
+    for (const p of known[name] ?? []) {
+      if (existsSync(p)) return p;
+    }
+    return null;
+  }
+  // POSIX: probe the common Homebrew / system bin dirs.
+  for (const dir of ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]) {
+    const candidate = joinPath(dir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * True if wezterm is resolvable right now (live PATH or a known install dir).
+ * Drops the resolve cache first so an install completed moments ago is seen.
+ */
+function weztermResolvable(): boolean {
+  weztermToolPathCache.delete("wezterm");
+  return resolveWeztermTool("wezterm") !== "wezterm" || !!whichLive("wezterm");
+}
+
 function installWezterm(result: PrereqInstallResult): void {
   const platform = process.platform;
 
   if (platform === "win32") {
-    if (whichSync("winget")) {
+    const winget = resolvePkgManager("winget");
+    if (winget) {
       runInstaller([
-        "winget",
+        winget,
         "install",
         "--id",
         "wez.wezterm",
@@ -2159,22 +2198,24 @@ function installWezterm(result: PrereqInstallResult): void {
         "--accept-source-agreements",
         "--accept-package-agreements",
       ]);
-      if (whichLive("wezterm")) {
+      if (weztermResolvable()) {
         result.installed.push("wezterm");
         return;
       }
     }
-    if (whichSync("scoop")) {
-      runInstaller(["scoop", "bucket", "add", "extras"]);
-      runInstaller(["scoop", "install", "wezterm"]);
-      if (whichLive("wezterm")) {
+    const scoop = resolvePkgManager("scoop");
+    if (scoop) {
+      runInstaller([scoop, "bucket", "add", "extras"]);
+      runInstaller([scoop, "install", "wezterm"]);
+      if (weztermResolvable()) {
         result.installed.push("wezterm");
         return;
       }
     }
-    if (whichSync("choco")) {
-      runInstaller(["choco", "install", "wezterm", "-y"]);
-      if (whichLive("wezterm")) {
+    const choco = resolvePkgManager("choco");
+    if (choco) {
+      runInstaller([choco, "install", "wezterm", "-y"]);
+      if (weztermResolvable()) {
         result.installed.push("wezterm");
         return;
       }
@@ -2189,9 +2230,10 @@ function installWezterm(result: PrereqInstallResult): void {
   }
 
   if (platform === "darwin") {
-    if (whichSync("brew")) {
-      runInstaller(["brew", "install", "--cask", "wezterm"]);
-      if (whichLive("wezterm")) {
+    const brew = resolvePkgManager("brew");
+    if (brew) {
+      runInstaller([brew, "install", "--cask", "wezterm"]);
+      if (weztermResolvable()) {
         result.installed.push("wezterm");
         return;
       }
@@ -2229,8 +2271,11 @@ function createPrereqsRoutes() {
         requiresSudo: boolean;
       }> = [];
       // wezterm is a manual install (no static download); ttyd is auto-resolved
-      // from the provider-managed cache (resolveBinary) or PATH.
-      if (!whichSync("wezterm")) {
+      // from the provider-managed cache (resolveBinary) or PATH. Use the
+      // absolute-path resolver, not Bun.which's startup snapshot, so a wezterm
+      // installed during this run (or in a standard dir not on the daemon's
+      // reduced PATH) is correctly reported present.
+      if (!weztermResolvable()) {
         missing.push({ name: "wezterm", kind: "binary", requiresSudo: false });
       }
       if (!resolveBinary("ttyd")) {
@@ -2247,7 +2292,7 @@ function createPrereqsRoutes() {
       };
 
       // wezterm: manual install (no reliable static binary to download).
-      if (!whichSync("wezterm")) {
+      if (!weztermResolvable()) {
         installWezterm(result);
       }
 
