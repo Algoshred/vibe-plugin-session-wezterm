@@ -415,6 +415,25 @@ function buildEnvAssignmentCommand(
   return `set "${key}=${value.replace(/"/g, '""')}"\r\n`;
 }
 
+type BunSpawnSyncResult = ReturnType<typeof Bun.spawnSync> & {
+  signalCode?: string | null;
+};
+
+function formatWeztermFailure(
+  args: string[],
+  result: BunSpawnSyncResult,
+): string {
+  const stdout = result.stdout?.toString("utf-8").trim() ?? "";
+  const stderr = result.stderr?.toString("utf-8").trim() ?? "";
+  const details = [
+    `exitCode=${result.exitCode ?? "null"}`,
+    result.signalCode ? `signal=${result.signalCode}` : null,
+    stderr ? `stderr=${stderr}` : null,
+    stdout ? `stdout=${stdout}` : null,
+  ].filter((part): part is string => part !== null);
+  return `wezterm ${args.join(" ")} failed (${details.join(", ") || "no output"})`;
+}
+
 /**
  * Execute a wezterm command and return its stdout. Throws on non-zero exit.
  */
@@ -423,12 +442,11 @@ function weztermExec(args: string[]): string {
     stdout: "pipe",
     stderr: "pipe",
     timeout: 10_000,
-  });
+  }) as BunSpawnSyncResult;
   if (result.exitCode !== 0) {
-    const stderr = result.stderr.toString().trim();
-    throw new Error(`wezterm exited with code ${result.exitCode}: ${stderr}`);
+    throw new Error(formatWeztermFailure(args, result));
   }
-  return result.stdout.toString("utf-8").trimEnd();
+  return result.stdout?.toString("utf-8").trimEnd() ?? "";
 }
 
 /**
@@ -716,31 +734,44 @@ class WeztermSessionProvider implements SessionProvider {
       args.push("--", config.shell);
     }
 
-    let paneIdStr: string;
+    let paneId: number | null = null;
+    let createError: string | undefined;
     try {
       // wezterm cli spawn returns the pane_id of the created pane
-      paneIdStr = weztermCliExec(args);
+      const paneIdStr = weztermCliExec(args);
+      paneId = parseInt(paneIdStr.trim(), 10);
+      if (isNaN(paneId)) {
+        throw new Error(
+          `wezterm cli spawn returned invalid pane_id: ${paneIdStr}`,
+        );
+      }
     } catch (err) {
+      createError = err instanceof Error ? err.message : String(err);
       this.log.error("Failed to create wezterm session", {
         id,
-        error: String(err),
+        error: createError,
       });
-      throw new Error(`Failed to create wezterm session: ${err}`, {
-        cause: err,
-      });
-    }
 
-    const paneId = parseInt(paneIdStr.trim(), 10);
-    if (isNaN(paneId)) {
-      throw new Error(
-        `wezterm cli spawn returned invalid pane_id: ${paneIdStr}`,
-      );
+      // Windows WezTerm 20240203 can create the mux workspace while Bun reports
+      // a GUI-subsystem process exit as `exitCode=null` with no stderr. Confirm
+      // by probing the mux state before falling back.
+      await sleep(100);
+      const recovered = this.findPaneInWorkspace(workspaceName);
+      if (recovered) {
+        paneId = recovered.pane_id;
+        this.log.warn("Recovered wezterm pane after spawn reported failure", {
+          id,
+          workspaceName,
+          paneId,
+          createError,
+        });
+      }
     }
 
     // Apply environment variables by sending shell-native assignment commands.
     // WezTerm has no post-spawn set-environment hook, so this mirrors tmux by
     // injecting commands into the pane after creation.
-    if (config.environment) {
+    if (paneId !== null && config.environment) {
       for (const [key, value] of Object.entries(config.environment)) {
         const assignment = buildEnvAssignmentCommand(key, value, config.shell);
         weztermCliExecSilent([
@@ -757,7 +788,7 @@ class WeztermSessionProvider implements SessionProvider {
     }
 
     // If an initial command is given, send it
-    if (config.command) {
+    if (paneId !== null && config.command) {
       weztermCliExecSilent([
         "send-text",
         "--pane-id",
@@ -769,7 +800,7 @@ class WeztermSessionProvider implements SessionProvider {
     }
 
     // Get the PID of the pane's process
-    const pid = this.getPanePid(paneId);
+    const pid = paneId !== null ? this.getPanePid(paneId) : null;
 
     const info: SessionInfo = {
       id,
@@ -783,22 +814,74 @@ class WeztermSessionProvider implements SessionProvider {
       createdAt: now,
       updatedAt: now,
       metadata: {
-        weztermPaneId: paneId,
+        ...(paneId !== null ? { weztermPaneId: paneId } : {}),
         weztermWorkspace: workspaceName,
         shell: config.shell,
         size: config.size,
+        ...(paneId === null
+          ? {
+              terminalOnly: true,
+              weztermCreateError: createError ?? "wezterm pane was not created",
+            }
+          : {}),
       },
     };
 
     await this.saveSession(info);
 
-    this.log.info("WezTerm session created", {
-      id,
-      workspaceName,
-      paneId,
-      pid,
-    });
+    if (paneId === null) {
+      this.log.warn(
+        "WezTerm pane unavailable; created ttyd-backed session record",
+        {
+          id,
+          workspaceName,
+          createError,
+        },
+      );
+    } else {
+      this.log.info("WezTerm session created", {
+        id,
+        workspaceName,
+        paneId,
+        pid,
+      });
+    }
     return info;
+  }
+
+  private findPaneInWorkspace(workspaceName: string): WeztermPaneInfo | null {
+    const panes = weztermListPanes().filter(
+      (p) => p.workspace === workspaceName,
+    );
+    return panes[0] ?? null;
+  }
+
+  private refreshSessionStatus(session: SessionInfo): boolean {
+    if (session.status === "terminated") return false;
+
+    const terminalInfo = this.getRunningTerminalInfo(session.id);
+    const hasPane = this.getPaneId(session) !== null;
+    const exists = hasPane
+      ? this.workspaceExists(this.getWorkspaceName(session))
+      : terminalInfo !== null;
+    let changed = false;
+
+    if (!exists && session.status === "active") {
+      session.status = "inactive";
+      session.updatedAt = nowISO();
+      session.terminal = undefined;
+      changed = true;
+    } else if (exists && session.status === "inactive") {
+      session.status = "active";
+      session.updatedAt = nowISO();
+      changed = true;
+    }
+
+    if (terminalInfo) {
+      session.terminal = terminalInfo;
+    }
+
+    return changed;
   }
 
   async terminate(sessionId: string): Promise<void> {
@@ -849,23 +932,8 @@ class WeztermSessionProvider implements SessionProvider {
     const session = sessions.find((s) => s.id === sessionId) ?? null;
 
     if (session) {
-      // Refresh live status from wezterm
-      const workspaceName = this.getWorkspaceName(session);
-      const exists = this.workspaceExists(workspaceName);
-      if (!exists && session.status === "active") {
-        session.status = "inactive";
-        session.updatedAt = nowISO();
+      if (this.refreshSessionStatus(session)) {
         await this.saveSession(session);
-      } else if (exists && session.status === "inactive") {
-        session.status = "active";
-        session.updatedAt = nowISO();
-        await this.saveSession(session);
-      }
-
-      // Attach terminal info if running
-      const termInfo = this.getRunningTerminalInfo(sessionId);
-      if (termInfo) {
-        session.terminal = termInfo;
       }
     }
 
@@ -874,25 +942,11 @@ class WeztermSessionProvider implements SessionProvider {
 
   async list(): Promise<SessionInfo[]> {
     const sessions = await this.loadSessions();
-    // Refresh statuses
+    let changed = false;
     for (const session of sessions) {
-      if (session.status === "terminated") continue;
-      const workspaceName = this.getWorkspaceName(session);
-      const exists = this.workspaceExists(workspaceName);
-      if (!exists && session.status === "active") {
-        session.status = "inactive";
-        session.updatedAt = nowISO();
-      } else if (exists && session.status !== "active") {
-        session.status = "active";
-        session.updatedAt = nowISO();
-      }
-      // Attach terminal info
-      const termInfo = this.getRunningTerminalInfo(session.id);
-      if (termInfo) {
-        session.terminal = termInfo;
-      }
+      changed = this.refreshSessionStatus(session) || changed;
     }
-    await this.saveSessions(sessions);
+    if (changed) await this.saveSessions(sessions);
     return sessions;
   }
 
@@ -1055,8 +1109,10 @@ class WeztermSessionProvider implements SessionProvider {
       return { terminated: true, exists: false };
     }
 
-    const workspaceName = this.getWorkspaceName(session);
-    const exists = this.workspaceExists(workspaceName);
+    const exists =
+      this.getPaneId(session) !== null
+        ? this.workspaceExists(this.getWorkspaceName(session))
+        : this.getRunningTerminalInfo(sessionId) !== null;
 
     return {
       terminated: session.status === "terminated" || !exists,
@@ -1074,7 +1130,7 @@ class WeztermSessionProvider implements SessionProvider {
 
   async startTerminal(sessionId: string, port?: number): Promise<TerminalInfo> {
     const session = await this.requireSession(sessionId);
-    const paneId = this.requirePaneId(session);
+    const paneId = this.getPaneId(session);
 
     // If already running, return existing info
     const existing = this.getRunningTerminalInfo(sessionId);
@@ -1122,10 +1178,13 @@ class WeztermSessionProvider implements SessionProvider {
     // ttyd shell correctly identifies as wezterm-managed.
     const ttydEnv: Record<string, string | undefined> = { ...process.env };
 
-    // Set wezterm identity
-    ttydEnv.WEZTERM_PANE = String(paneId);
-    ttydEnv.WEZTERM_UNIX_SOCKET =
-      process.env.WEZTERM_UNIX_SOCKET || "managed-by-vibecontrols";
+    // Set wezterm identity when a mux pane exists. Windows fallback sessions
+    // are ttyd-backed and intentionally have no pane id.
+    if (paneId !== null) {
+      ttydEnv.WEZTERM_PANE = String(paneId);
+      ttydEnv.WEZTERM_UNIX_SOCKET =
+        process.env.WEZTERM_UNIX_SOCKET || "managed-by-vibecontrols";
+    }
     ttydEnv.TERM_PROGRAM = "WezTerm";
     ttydEnv.VIBECONTROLS_PROVIDER = "wezterm";
 
@@ -1222,6 +1281,7 @@ class WeztermSessionProvider implements SessionProvider {
     };
 
     // Update session record with terminal info
+    session.status = "active";
     session.terminal = terminalInfo;
     session.updatedAt = nowISO();
     await this.saveSession(session);
@@ -2163,18 +2223,15 @@ class WeztermSessionProvider implements SessionProvider {
     for (const session of sessions) {
       if (session.status === "terminated") continue;
 
-      const workspaceName = this.getWorkspaceName(session);
-      const exists = this.workspaceExists(workspaceName);
-
-      if (!exists && session.status === "active") {
-        session.status = "inactive";
-        session.updatedAt = nowISO();
-        session.terminal = undefined;
-        changed = true;
-        this.log.info("Reconciled stale session as inactive", {
+      const previousStatus = session.status;
+      if (this.refreshSessionStatus(session)) {
+        this.log.info("Reconciled session status", {
           id: session.id,
           name: session.name,
+          previousStatus,
+          status: session.status,
         });
+        changed = true;
       }
     }
 
