@@ -455,7 +455,9 @@ class WeztermSessionProvider implements SessionProvider {
    * @returns the human-readable labels of what was reaped.
    */
   async nuke(): Promise<string[]> {
-    this.log.info("WeztermSessionProvider nuke — reaping all spawned resources");
+    this.log.info(
+      "WeztermSessionProvider nuke — reaping all spawned resources",
+    );
     const reaped: string[] = [];
 
     // 1. Stop every ttyd terminal-server we spawned (graceful then forced).
@@ -485,7 +487,11 @@ class WeztermSessionProvider implements SessionProvider {
         let killedAny = false;
         for (const pane of wsPanes) {
           if (
-            weztermCliExecSilent(["kill-pane", "--pane-id", String(pane.pane_id)])
+            weztermCliExecSilent([
+              "kill-pane",
+              "--pane-id",
+              String(pane.pane_id),
+            ])
           ) {
             panesKilled++;
             killedAny = true;
@@ -939,9 +945,18 @@ class WeztermSessionProvider implements SessionProvider {
       return existing;
     }
 
-    // Find available port
+    // Find an available port, scanning ABOVE the highest port we've already
+    // handed out. `findAvailablePort` only OS-probes free ports — during the
+    // window between assigning a port and ttyd actually binding it (the sleep
+    // below), a concurrent/back-to-back start would otherwise re-pick the same
+    // not-yet-bound port and one ttyd would die on bind. Excluding in-flight
+    // ports makes per-session ports collision-free.
+    const inUsePorts = [...this.ttydPorts.values()];
+    const scanStart = inUsePorts.length
+      ? Math.max(TTYD_BASE_PORT, Math.max(...inUsePorts) + 1)
+      : TTYD_BASE_PORT;
     const assignedPort =
-      port ?? (await findAvailablePort(TTYD_BASE_PORT, TTYD_PORT_RANGE));
+      port ?? (await findAvailablePort(scanStart, TTYD_PORT_RANGE));
 
     this.log.info("Starting ttyd terminal", {
       sessionId,
@@ -1004,7 +1019,12 @@ class WeztermSessionProvider implements SessionProvider {
       ],
       {
         stdout: "ignore",
-        stderr: "ignore",
+        // Pipe stderr so a ttyd that exits on launch (port already bound,
+        // missing mux target, bad binary) is DIAGNOSABLE instead of being
+        // stored with a soon-dead PID that only surfaces downstream as the
+        // opaque "Terminal not running for this session". Drained (capped)
+        // below so the pipe never blocks a long-lived ttyd.
+        stderr: "pipe",
         stdin: "ignore",
         cwd,
         env: ttydEnv as Record<string, string>,
@@ -1015,8 +1035,39 @@ class WeztermSessionProvider implements SessionProvider {
       throw new Error("Failed to start ttyd — no PID returned");
     }
 
-    // Give ttyd a moment to bind the port
+    let ttydStderr = "";
+    const stderrStream = child.stderr as ReadableStream<Uint8Array> | undefined;
+    if (stderrStream && typeof stderrStream.getReader === "function") {
+      void (async () => {
+        try {
+          const reader = stderrStream.getReader();
+          const dec = new TextDecoder();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (ttydStderr.length < 4096)
+              ttydStderr += dec.decode(value, { stream: true });
+          }
+        } catch {
+          // stream closed/cancelled — nothing to capture
+        }
+      })();
+    }
+
+    // Give ttyd a moment to bind the port, then confirm it actually survived.
     await sleep(500);
+    if (child.exitCode !== null || !isProcessAlive(child.pid)) {
+      const detail = ttydStderr.trim().slice(0, 300) || "no stderr captured";
+      this.log.error("ttyd exited immediately after launch", {
+        sessionId,
+        port: assignedPort,
+        exitCode: child.exitCode,
+        stderr: detail,
+      });
+      throw new Error(
+        `ttyd exited immediately (code ${child.exitCode ?? "unknown"}) on port ${assignedPort}: ${detail}`,
+      );
+    }
 
     // Store references
     this.ttydPids.set(sessionId, child.pid);
