@@ -230,16 +230,45 @@ const TTYD_DOWNLOADS: Partial<Record<ToolPlatform, BinaryDownload>> = {
   },
 };
 
+function ttydManualInstallCommand(): string {
+  if (process.platform === "darwin") return "brew install ttyd";
+  if (process.platform === "win32") {
+    return "download ttyd.win32.exe from https://github.com/tsl0922/ttyd/releases and place it on PATH";
+  }
+  return "install ttyd from your distro package manager or see https://github.com/tsl0922/ttyd#installation";
+}
+
 /**
- * Resolve the ttyd binary path. Prefers the provider-managed cache (absolute
- * path, immune to the `Bun.which` PATH snapshot), then the current PATH, then
- * the bare name so the OS gives a sensible "command not found".
+ * Resolve or install the ttyd binary path. Terminal startup must not fall back
+ * to a bare `ttyd.exe` on Windows: Bun surfaces that as an opaque uv_spawn
+ * ENOENT after the session has already been created. Resolve/install first so
+ * the failure is recoverable and diagnostic.
  */
-function resolveTtydCmd(): string {
-  return (
-    resolveBinary("ttyd") ??
-    (process.platform === "win32" ? "ttyd.exe" : "ttyd")
-  );
+async function ensureTtydBinary(log?: BoundLogger): Promise<string> {
+  const existing = resolveBinary("ttyd");
+  if (existing) return existing;
+
+  log?.info("ttyd not found — attempting auto-install");
+  try {
+    const installed = await installBinary({
+      name: "ttyd",
+      downloads: TTYD_DOWNLOADS,
+      versionMatcher: "ttyd version",
+      log: {
+        info: (msg) => log?.info(msg),
+        warn: (msg) => log?.warn(msg),
+        error: (msg) => log?.error(msg),
+      },
+    });
+    log?.info("ttyd auto-installed", { path: installed });
+    return installed;
+  } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `ttyd is not available and auto-install failed. ${ttydManualInstallCommand()}. Cause: ${cause}`,
+      { cause: err },
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1202,31 +1231,44 @@ class WeztermSessionProvider implements SessionProvider {
       }
     }
 
-    const child = Bun.spawn(
-      [
-        resolveTtydCmd(),
-        "-t",
-        "fontSize=14",
-        "-t",
-        `theme={"background":"#1e1e1e","foreground":"#cccccc"}`,
-        "--writable",
-        "--port",
-        String(assignedPort),
-        shell,
-      ],
-      {
-        stdout: "ignore",
-        // Pipe stderr so a ttyd that exits on launch (port already bound,
-        // missing mux target, bad binary) is DIAGNOSABLE instead of being
-        // stored with a soon-dead PID that only surfaces downstream as the
-        // opaque "Terminal not running for this session". Drained (capped)
-        // below so the pipe never blocks a long-lived ttyd.
-        stderr: "pipe",
-        stdin: "ignore",
-        cwd,
-        env: ttydEnv as Record<string, string>,
-      },
-    );
+    const ttydCmd = await ensureTtydBinary(this.log);
+    let child: ReturnType<typeof Bun.spawn>;
+    try {
+      child = Bun.spawn(
+        [
+          ttydCmd,
+          "-t",
+          "fontSize=14",
+          "-t",
+          `theme={"background":"#1e1e1e","foreground":"#cccccc"}`,
+          "--writable",
+          "--port",
+          String(assignedPort),
+          shell,
+        ],
+        {
+          stdout: "ignore",
+          // Pipe stderr so a ttyd that exits on launch (port already bound,
+          // missing mux target, bad binary) is DIAGNOSABLE instead of being
+          // stored with a soon-dead PID that only surfaces downstream as the
+          // opaque "Terminal not running for this session". Drained (capped)
+          // below so the pipe never blocks a long-lived ttyd.
+          stderr: "pipe",
+          stdin: "ignore",
+          cwd,
+          env: ttydEnv as Record<string, string>,
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/ENOENT|no such file|not found|uv_spawn/i.test(message)) {
+        throw new Error(
+          `ttyd binary could not be spawned at "${ttydCmd}". ${ttydManualInstallCommand()}. Cause: ${message}`,
+          { cause: err },
+        );
+      }
+      throw err;
+    }
 
     if (!child.pid) {
       throw new Error("Failed to start ttyd — no PID returned");
@@ -2464,24 +2506,14 @@ function createPrereqsRoutes() {
       // PATH; only download when truly absent.
       if (!resolveBinary("ttyd")) {
         try {
-          await installBinary({
-            name: "ttyd",
-            downloads: TTYD_DOWNLOADS,
-            versionMatcher: "ttyd version",
-          });
+          await ensureTtydBinary();
           result.installed.push("ttyd");
         } catch (err) {
           // Auto-download failed (offline, unsupported arch, or macOS which
           // has no static asset) — fall back to a manual instruction.
-          const manual =
-            process.platform === "darwin"
-              ? "brew install ttyd"
-              : process.platform === "win32"
-                ? "winget install ttyd    # or download from https://github.com/tsl0922/ttyd/releases"
-                : "see https://github.com/tsl0922/ttyd#installation";
           result.pendingSudo.push({
             name: "ttyd",
-            command: manual,
+            command: ttydManualInstallCommand(),
             reason: `ttyd auto-download failed: ${
               err instanceof Error ? err.message : String(err)
             }`,
