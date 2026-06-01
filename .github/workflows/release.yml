@@ -65,17 +65,8 @@ jobs:
           elif [ -n "${{ inputs.version }}" ]; then
             VERSION="${{ inputs.version }}"
           else
-            YYYY=$(date -u '+%Y')
-            MDD=$((10#$(date -u '+%m%d')))
-            DATE_PREFIX="${YYYY}.${MDD}"
-
-            EXISTING=$(bunx npm@latest view "${NAME}" versions --json 2>/dev/null \
-              | jq -r '.[]? // empty' \
-              | grep -E "^${DATE_PREFIX}\.[0-9]+$" | sort -t. -k3 -n || true)
-
-            MAX_PATCH=$(echo "$EXISTING" | tail -1 | cut -d. -f3)
-            NEXT_PATCH=$(( ${MAX_PATCH:-0} + 1 ))
-            VERSION="${DATE_PREFIX}.${NEXT_PATCH}"
+            echo "::error::workflow_dispatch requires an explicit 'version' input (auto-increment removed to stop version inflation)"
+            exit 1
           fi
 
           if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[1-9][0-9]{0,3}\.[0-9]+$'; then
