@@ -1241,6 +1241,23 @@ class WeztermSessionProvider implements SessionProvider {
           "fontSize=14",
           "-t",
           `theme={"background":"#1e1e1e","foreground":"#cccccc"}`,
+          // Selection / copy ergonomics — kept in sync with the tmux + zellij
+          // providers and the SSH remote-terminal route. Full-screen TUI apps
+          // turn on mouse reporting which otherwise eats a drag, leaving
+          // nothing selected for ttyd's built-in copy-on-select to copy
+          // (BOFF-2856). ttyd already copies on selection via
+          // document.execCommand('copy'); there is no `copyOnSelect` option.
+          //   macOptionClickForcesSelection — Option+drag forces a native
+          //     selection even under apps with mouse reporting on.
+          //   rightClickSelectsWord — right-click selects a word so the
+          //     browser context-menu copy has something to grab.
+          //   scrollback — generous local scrollback buffer.
+          "-t",
+          "macOptionClickForcesSelection=true",
+          "-t",
+          "rightClickSelectsWord=true",
+          "-t",
+          "scrollback=10000",
           "--writable",
           "--port",
           String(assignedPort),
