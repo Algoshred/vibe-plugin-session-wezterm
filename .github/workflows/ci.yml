@@ -59,6 +59,20 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Check npm publish token
+        # The org secret NPM_TOKEN is visible to private repos only, so in a public
+        # plugin repo it resolves to an empty string and npm fails late with
+        # ENEEDAUTH. Public plugin repos publish with the repo secret
+        # NPMJS_VIBECONTROLS_TOKEN; fail fast with a clear message if neither is set.
+        env:
+          NPM_PUBLISH_TOKEN: ${{ secrets.NPMJS_VIBECONTROLS_TOKEN || secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_PUBLISH_TOKEN}" ]; then
+            echo "::error::No npm publish token available. Add the repo secret NPMJS_VIBECONTROLS_TOKEN (the org secret NPM_TOKEN is not passed to public repos)."
+            exit 1
+          fi
+          echo "npm publish token present"
+
       - name: Checkout
         uses: actions/checkout@v6
 
@@ -104,7 +118,7 @@ jobs:
           bunx npm@latest version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
           bunx npm@latest publish --registry "https://registry.npmjs.org/" --tag latest --access public --ignore-scripts
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPMJS_VIBECONTROLS_TOKEN || secrets.NPM_TOKEN }}
 
       - name: Summary
         if: always()
