@@ -63,7 +63,6 @@ jobs:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     permissions:
-      id-token: write
       contents: read
       pull-requests: write
       issues: write
@@ -102,7 +101,6 @@ jobs:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     permissions:
-      id-token: write
       contents: read
       pull-requests: write
       issues: write
@@ -141,7 +139,6 @@ jobs:
       OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     permissions:
-      id-token: write
       contents: read
       pull-requests: write
       issues: write
