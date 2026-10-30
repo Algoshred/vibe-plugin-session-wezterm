@@ -10,6 +10,7 @@ jobs:
     # Bots (Dependabot, release bots) do not need human reviewers (BOFF-10423).
     if: github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: uesteibar/reviewer-lottery@v4
