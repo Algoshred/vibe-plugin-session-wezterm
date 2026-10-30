@@ -7,6 +7,8 @@ on:
 jobs:
   assign-reviewers:
     name: Assign Reviewers
+    # Bots (Dependabot, release bots) do not need human reviewers (BOFF-10423).
+    if: github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

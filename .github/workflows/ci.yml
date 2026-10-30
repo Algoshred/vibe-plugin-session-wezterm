@@ -17,6 +17,12 @@ on:
       - "LICENSE"
       - ".gitignore"
   pull_request:
+    # Documentation-only changes cannot change what this workflow checks
+    # (BOFF-10423). Not used on required checks such as PR Gate.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
     branches: [main]
   workflow_dispatch:
 
