@@ -1,0 +1,83 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: actions/common/publish-junit/action.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# publish-junit: turn JUnit XML (bun test --reporter=junit, vitest, pytest) into
+# a check run with annotations. Fork and Dependabot pull requests get a token
+# without checks:write, so they only annotate instead of failing on a 403.
+name: publish-junit
+description: Publish JUnit XML results as a check run (annotations only on fork and Dependabot pull requests).
+
+inputs:
+  report-paths:
+    description: Glob of JUnit XML files.
+    required: false
+    default: '**/junit.xml'
+  check-name:
+    description: Name of the check run.
+    required: false
+    default: Test results
+  fail-on-failure:
+    description: Fail this step when the report holds a failed test ("true" or "false").
+    required: false
+    default: 'false'
+  require-tests:
+    description: Fail when no test results are found ("true" or "false").
+    required: false
+    default: 'true'
+  annotate-only:
+    description: '"auto" (annotate only on fork and Dependabot pull requests), "true" or "false".'
+    required: false
+    default: auto
+  token:
+    description: Token for the check run.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  total:
+    description: Number of tests found.
+    value: ${{ steps.report.outputs.total }}
+  failed:
+    description: Number of failed tests.
+    value: ${{ steps.report.outputs.failed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Decide the publishing mode
+      id: mode
+      shell: bash
+      env:
+        ANNOTATE_ONLY: ${{ inputs.annotate-only }}
+        EVENT_NAME: ${{ github.event_name }}
+        HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        BASE_REPO: ${{ github.repository }}
+        ACTOR: ${{ github.actor }}
+      run: |
+        set -euo pipefail
+        case "$ANNOTATE_ONLY" in
+          true|false) mode="$ANNOTATE_ONLY" ;;
+          auto)
+            mode=false
+            if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "pull_request_target" ]; then
+              if [ "$HEAD_REPO" != "$BASE_REPO" ] || [ "$ACTOR" = "dependabot[bot]" ]; then
+                mode=true
+              fi
+            fi
+            ;;
+          *) echo "::error::annotate-only must be auto, true or false, not '${ANNOTATE_ONLY}'"; exit 1 ;;
+        esac
+        echo "annotate-only=${mode}" >> "$GITHUB_OUTPUT"
+        echo "annotate_only=${mode}"
+
+    - name: Publish the report
+      id: report
+      uses: mikepenz/action-junit-report@a16be3a69023e9bd7e748ede768b3282ea7b30ce # v6.7.1
+      with:
+        report_paths: ${{ inputs.report-paths }}
+        check_name: ${{ inputs.check-name }}
+        annotate_only: ${{ steps.mode.outputs.annotate-only }}
+        fail_on_failure: ${{ inputs.fail-on-failure }}
+        require_tests: ${{ inputs.require-tests }}
+        token: ${{ inputs.token }}
+        detailed_summary: true
+        include_passed: false

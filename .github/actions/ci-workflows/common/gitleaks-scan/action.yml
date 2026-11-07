@@ -1,0 +1,64 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: actions/common/gitleaks-scan/action.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# gitleaks-scan: secret scan of the commits an event brings in AND of the net
+# change as it lands (BOFF-10449).
+#
+#   * commit scan: `gitleaks git --log-opts=<from>..<to>` over every commit in
+#     the range, merged-in branches included (no --first-parent; gitleaks-action
+#     v2 scans pull requests with `--no-merges --first-parent` and misses a
+#     secret that arrives by merging another branch into the PR);
+#   * net-change scan: every file added or modified between <from> and HEAD,
+#     copied as it lands and scanned with `gitleaks dir`. This also covers a
+#     conflict resolution inside a merge commit, which `git log -p` never shows.
+#
+# Range when `from` is empty: pull_request = parents of GitHub's merge commit
+# (base tip .. PR head); push = before..after (a new branch scans the whole
+# history and tree); anything else = full history plus the whole tree.
+#
+# The gitleaks binary is a pinned release verified by SHA-256 (no licence key
+# needed, unlike gitleaks-action for organisation repos). Needs a full-history
+# checkout (fetch-depth: 0).
+name: gitleaks-scan
+description: gitleaks over the event's commits (merged-in branches included) and over its net change.
+
+inputs:
+  path:
+    description: Repository checkout to scan.
+    required: false
+    default: .
+  from:
+    description: Base commit of the range. Empty = derive it from the event.
+    required: false
+    default: ''
+  to:
+    description: Tip commit of the range (with `from`).
+    required: false
+    default: HEAD
+  config:
+    description: gitleaks config, relative to `path`; used when the file exists.
+    required: false
+    default: .gitleaks.toml
+
+outputs:
+  range:
+    description: The scanned range (`<from>..<to>`, or `full`).
+    value: ${{ steps.scan.outputs.range }}
+  net-change-files:
+    description: Number of files the net-change scan covered.
+    value: ${{ steps.scan.outputs.net-change-files }}
+
+runs:
+  using: composite
+  steps:
+    - name: gitleaks (commits and net change)
+      id: scan
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        INPUT_FROM: ${{ inputs.from }}
+        INPUT_TO: ${{ inputs.to }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        EVENT_NAME: ${{ github.event_name }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.event.after }}
+      run: bash "$GITHUB_ACTION_PATH/scan.sh"

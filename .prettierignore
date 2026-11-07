@@ -1,0 +1,9 @@
+dist/
+node_modules/
+coverage/
+bun.lock
+# Workflows are owned by their generators: the vendored ci-workflows files
+# (scripts/vendor.ts, checksummed in .github/ci-workflows-vendor.json) and the
+# AI review standard (apply-ai-review.ts). Reformatting them here would make
+# them drift from their sources.
+.github/

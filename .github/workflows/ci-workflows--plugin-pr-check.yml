@@ -1,0 +1,256 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: .github/workflows/plugin-pr-check.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# Reusable PR check for public vibe plugins (`vibe-plugin-*`, plan sections 8.3
+# and 10.7). Plugin repositories are PUBLIC and cannot call this private
+# repository, so they never reference this file directly: they receive a
+# vendored copy through scripts/vendor.ts (templates/plugin/pr-check.yml), which
+# rewrites every `$/actions/...` reference to the vendored copy under
+# `.github/actions/ci-workflows/`.
+#
+# Jobs:
+#   sanity  checkout -> setup-bun-install (frozen install, lockfile drift guard,
+#           boff doctor --ci) -> vendored-workflow integrity -> restore-sanity-cache
+#           -> boff sanity (format check, lint, bun check, build incl.
+#           `tsc --emitDeclarationOnly`, bun test with JUnit, knip when
+#           configured) -> package contents check -> publish-junit.
+#   audit   bun audit --audit-level=high; advisory unless `audit-blocking`.
+#
+# `PR Gate` is never emitted here: the caller keeps it (templates/README.md).
+
+name: Plugin PR check (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label.
+        required: false
+        type: string
+        default: ubuntu-latest
+      timeout-minutes:
+        description: Timeout of each job, in minutes.
+        required: false
+        type: number
+        default: 15
+      working-directory:
+        description: Directory holding package.json, relative to the repository root.
+        required: false
+        type: string
+        default: '.'
+      sanity-force:
+        description: 'Ignore sanity stamps ("auto": force on every event except pull_request; "true"; "false").'
+        required: false
+        type: string
+        default: auto
+      pack-check:
+        description: Check that `npm pack` would ship every file package.json promises (main, types, bin, exports).
+        required: false
+        type: boolean
+        default: true
+      audit:
+        description: Run `bun audit --audit-level=high`.
+        required: false
+        type: boolean
+        default: true
+      audit-blocking:
+        description: Fail the audit job on findings (otherwise it only warns).
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      sanity-result:
+        description: Result of the sanity job.
+        value: ${{ jobs.sanity.result }}
+
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    name: Sanity (format, lint, check, build, test)
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      checks: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Bun and install (frozen)
+        uses: ./.github/actions/ci-workflows/common/setup-bun-install
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          cache-mode: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+
+      - name: Vendored ci-workflows files are unmodified
+        # Only the vendored dependencies are checked (reusable workflows copied as
+        # `ci-workflows--<name>.yml` and composite actions under
+        # `.github/actions/ci-workflows/`). The caller files themselves
+        # (pr-check.yml, release.yml) are repository-owned: repository-specific
+        # jobs and the AI review block are added to them by design.
+        run: |
+          set -euo pipefail
+          manifest=.github/ci-workflows-vendor.json
+          if [ ! -f "$manifest" ]; then
+            echo "No ${manifest}; nothing vendored to verify"
+            exit 0
+          fi
+          bad=0
+          while IFS=$'\t' read -r path want; do
+            if [ ! -f "$path" ]; then
+              echo "::error file=${path}::vendored file is missing (regenerate with scripts/vendor.ts in algoshred/ci-workflows)"
+              bad=1
+              continue
+            fi
+            have=$(sha256sum "$path" | cut -d' ' -f1)
+            if [ "$have" != "$want" ]; then
+              echo "::error file=${path}::vendored file was edited by hand; regenerate it with scripts/vendor.ts in algoshred/ci-workflows"
+              bad=1
+            fi
+          done < <(jq -r '.files | to_entries[] | select((.key | startswith(".github/workflows/ci-workflows--")) or (.key | startswith(".github/actions/ci-workflows/"))) | "\(.key)\t\(.value)"' "$manifest")
+          [ "$bad" -eq 0 ]
+          echo "Vendored files match $(jq -r '.source + "@" + .sha' "$manifest")"
+
+      - name: Restore the sanity state
+        uses: ./.github/actions/ci-workflows/common/restore-sanity-cache
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          cache-mode: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+
+      - name: boff sanity
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          COMPARE_BRANCH: origin/${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          FORCE_INPUT: ${{ inputs.sanity-force }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "$FORCE_INPUT" in
+            auto) if [ "$EVENT_NAME" != "pull_request" ]; then export SANITY_FORCE=1; fi ;;
+            true) export SANITY_FORCE=1 ;;
+            false) ;;
+            *) echo "::error::sanity-force must be auto, true or false, not '${FORCE_INPUT}'"; exit 1 ;;
+          esac
+          ./node_modules/.bin/boff sanity
+
+      - name: Package contents
+        if: inputs.pack-check
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          if [ ! -d dist ]; then
+            # A warm sanity run restores stamps, not dist/: build it for the check.
+            bun run build
+          fi
+          npm pack --dry-run --json --ignore-scripts > "$RUNNER_TEMP/pack.json"
+          jq -r '.[0].files[].path' "$RUNNER_TEMP/pack.json" | sed 's#^\./##' | sort -u > "$RUNNER_TEMP/packed.txt"
+          jq -r '
+            [ (if (.bin | type) == "string" then .bin
+               elif (.bin | type) == "object" then .bin[]
+               else empty end),
+              (.main // empty), (.types // empty), (.typings // empty),
+              (.exports // {} | .. | strings) ]
+            | .[] | select(endswith(".js") or endswith(".d.ts") or endswith(".mjs") or endswith(".cjs"))
+            | sub("^\\./"; "")' package.json | sort -u > "$RUNNER_TEMP/promised.txt"
+          missing=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if ! grep -Fxq -- "$f" "$RUNNER_TEMP/packed.txt"; then
+              echo "::error::package.json names '${f}' but the tarball would not contain it"
+              missing=1
+            fi
+          done < "$RUNNER_TEMP/promised.txt"
+          main=$(jq -r '.main // empty' package.json | sed 's#^\./##')
+          if [ -n "$main" ]; then
+            dts="${main%.js}.d.ts"
+            if ! grep -Fxq -- "$dts" "$RUNNER_TEMP/packed.txt"; then
+              echo "::error::the tarball has no ${dts}; the build must keep emitting declarations (tsc --emitDeclarationOnly)"
+              missing=1
+            fi
+          fi
+          [ "$missing" -eq 0 ]
+          echo "Tarball: $(wc -l < "$RUNNER_TEMP/packed.txt") files, $(jq -r '.[0].size' "$RUNNER_TEMP/pack.json") bytes"
+
+      - name: Find the JUnit report
+        id: junit
+        if: always()
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f junit.xml ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No junit.xml (no test files, or the test step was cached)"
+          fi
+
+      - name: Publish test results
+        if: always() && steps.junit.outputs.found == 'true'
+        uses: ./.github/actions/ci-workflows/common/publish-junit
+        with:
+          report-paths: ${{ inputs.working-directory }}/junit.xml
+          check-name: Plugin tests
+          fail-on-failure: 'true'
+
+  audit:
+    name: bun audit
+    if: inputs.audit
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: ${{ inputs.working-directory == '.' && '.bun-version' || format('{0}/.bun-version', inputs.working-directory) }}
+
+      - name: bun audit --audit-level=high
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          BLOCKING: ${{ inputs.audit-blocking }}
+        run: |
+          set -uo pipefail
+          # bun audit exits 1 both on findings and when the registry is
+          # unreachable; retry once and tell the two apart from the output.
+          for attempt in 1 2; do
+            bun audit --audit-level=high > "$RUNNER_TEMP/audit.log" 2>&1
+            rc=$?
+            cat "$RUNNER_TEMP/audit.log"
+            if [ "$rc" -eq 0 ]; then
+              echo "bun audit: no high or critical advisories"
+              exit 0
+            fi
+            if grep -Eqi 'vulnerabilit|advisor|GHSA-' "$RUNNER_TEMP/audit.log"; then
+              break
+            fi
+            echo "::warning::bun audit failed without findings (registry unreachable?); attempt ${attempt}"
+            sleep 10
+          done
+          if grep -Eqi 'vulnerabilit|advisor|GHSA-' "$RUNNER_TEMP/audit.log"; then
+            if [ "$BLOCKING" = "true" ]; then
+              echo "::error::bun audit found high or critical advisories"
+              exit 1
+            fi
+            echo "::warning::bun audit found high or critical advisories (advisory on this repository)"
+            exit 0
+          fi
+          if [ "$BLOCKING" = "true" ]; then
+            echo "::error::bun audit could not reach the registry"
+            exit 1
+          fi
+          echo "::warning::bun audit could not reach the registry (advisory on this repository)"

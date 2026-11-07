@@ -1,21 +1,63 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: templates/plugin/pr-check.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# PR check caller for a public vibe plugin (plan sections 8.2, 8.3 and 10.7).
+#
+# Plugin repositories are public, so this template is never pinned with
+# scripts/repin.ts: it is vendored with scripts/vendor.ts, which copies the
+# reusable workflows and composite actions it uses into the repository and
+# rewrites the `uses:` lines to local paths:
+#
+#   bun scripts/vendor.ts --dest <clone> --template plugin/pr-check.yml \
+#     --template plugin/release.yml --ref <sha> --version <vYYYY.MDD.N or date>
+#
+# `PR Gate` is the only required check. It stays in this file with the job id
+# `pr-gate`, runs `if: always()`, and fails unless every job it needs
+# succeeded. Never add `paths`/`paths-ignore` to this workflow. Repository
+# specific jobs go above `pr-gate` and into its `needs`. AI review jobs that a
+# repository kept in this file are appended after `pr-gate` unchanged (the
+# caller is repository-owned; only the vendored dependencies are checksummed).
 name: PR Check
 
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  checks: write
 
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: pr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci-workflows--plugin-pr-check.yml
+    permissions:
+      contents: read
+      checks: write
+
+  security:
+    uses: ./.github/workflows/ci-workflows--common-security-scan.yml
+    permissions:
+      contents: read
+
   pr-gate:
     name: PR Gate
+    if: always()
+    needs: [checks, security]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - name: Gate passed
-        run: echo "All checks passed"
+      - name: Every needed job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.key)=\(.value.result)"' <<< "$NEEDS"
+          jq -e 'length > 0 and (to_entries | all(.value.result == "success"))' <<< "$NEEDS" > /dev/null
   # ai-review-standard: v4
   claude-review:
     name: Claude Code Review

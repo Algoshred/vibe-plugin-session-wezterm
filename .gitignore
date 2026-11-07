@@ -18,3 +18,4 @@ temp/
 .build-sha
 **/.build-sha
 .eslintcache
+junit.xml

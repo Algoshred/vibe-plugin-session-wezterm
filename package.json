@@ -5,7 +5,7 @@
   "main": "./dist/index.js",
   "description": "WezTerm + ttyd session provider plugin for VibeControls Agent",
   "engines": {
-    "bun": ">=1.3.14"
+    "bun": ">=1.4.4"
   },
   "author": {
     "name": "Vignesh T.V",
@@ -13,32 +13,31 @@
   },
   "license": "MIT",
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir ./dist --target bun --minify-syntax --minify-whitespace --external elysia && tsc --emitDeclarationOnly --declaration --outDir ./dist",
-    "dev": "tsc --watch",
-    "lint": "eslint ./src",
-    "lint:sanity": "if [ \"${CI:-}\" = \"true\" ]; then bun run lint; else bun run lint -- --cache --cache-location .eslintcache; fi",
-    "format": "bunx prettier . --write",
-    "format:check": "bunx prettier . --check",
-    "type:check": "bash scripts/build-limits.sh tsc --noEmit",
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun --minify-syntax --minify-whitespace --external elysia && tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "lint": "eslint .",
+    "format": "bun fmt",
+    "format:check": "bun fmt --check",
+    "type:check": "boff gate -- bun check --no-pretty",
     "clean": "rimraf dist",
     "prebuild": "bun run clean",
     "prepublishOnly": "bun run build",
-    "sanity": "bash scripts/build-limits.sh --gate bash -c 'bun run format:check && bun run lint:sanity && bun run type:check && bun run build'"
+    "sanity": "boff sanity",
+    "test": "bun test",
+    "sanity:force": "boff sanity --force",
+    "audit": "bun audit --audit-level=high"
   },
   "dependencies": {
     "@vibecontrols/plugin-sdk": "2026.530.5",
     "elysia": "^1.4.28"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@types/bun": "^1.3.9",
-    "@types/node": "^22.0.0",
-    "eslint": "^9.30.1",
-    "globals": "^17.3.0",
-    "prettier": "^3.6.2",
-    "rimraf": "^6.0.1",
-    "typescript": "^5.9.3",
-    "typescript-eslint": "^8.56.0"
+    "@burdenoff/toolchain": "2026.1107.14",
+    "@types/bun": "^1.4.4",
+    "eslint": "^9.39.5",
+    "knip": "^6.44.1",
+    "rimraf": "^6.1.4",
+    "typescript": "6.0.3"
   },
   "peerDependencies": {
     "@vibecontrols/agent": ">=2026.529.13",
@@ -85,7 +84,7 @@
     "fast-xml-parser": ">=4.5.5",
     "@xmldom/xmldom": ">=0.8.12",
     "swiper": ">=12.1.2",
-    "brace-expansion": ">=1.1.13",
+    "brace-expansion": ">=5.0.12",
     "follow-redirects": ">=1.15.12",
     "smol-toml": ">=1.6.1",
     "axios": ">=1.15.0",
@@ -94,5 +93,18 @@
     "picomatch": ">=2.3.2",
     "immutable": ">=3.8.3",
     "minimatch": ">=3.1.3"
+  },
+  "packageManager": "bun@1.4.4",
+  "boff": {
+    "type": "plugin",
+    "sanity": {
+      "steps": [
+        "format",
+        "lint",
+        "typecheck",
+        "build",
+        "knip"
+      ]
+    }
   }
 }

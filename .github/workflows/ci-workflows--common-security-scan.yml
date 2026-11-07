@@ -1,0 +1,154 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: .github/workflows/common-security-scan.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# Reusable security scan: Trivy (filesystem) and gitleaks (history + net change).
+#
+# gitleaks (actions/common/gitleaks-scan): every commit the event brings in,
+# merged-in branches included (gitleaks-action v2 scans pull requests with
+# `--no-merges --first-parent` and misses a secret that arrives by merging
+# another branch into the PR, BOFF-10449), plus a net-change scan of every
+# added or modified file as it lands, which also covers conflict resolutions
+# inside merge commits. The binary is a pinned, checksum-verified release, so
+# no gitleaks licence key is needed.
+#
+# Trivy: `trivy fs` over the checkout. Fixable findings at `trivy-fail-severity`
+# fail the job; `trivy-report-severity` findings are reported in a SARIF
+# artifact (no SARIF upload: Code Security is not licensed for private repos).
+#
+# Caller:
+#   security:
+#     uses: algoshred/ci-workflows/.github/workflows/common-security-scan.yml@<sha> # vYYYY.MDD.N
+#     secrets: inherit
+
+name: Security scan (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label.
+        required: false
+        type: string
+        default: ubuntu-latest
+      timeout-minutes:
+        description: Timeout of each job.
+        required: false
+        type: number
+        default: 15
+      trivy:
+        description: Run the Trivy filesystem scan.
+        required: false
+        type: boolean
+        default: true
+      trivy-scan-ref:
+        description: Path Trivy scans, relative to the repository root.
+        required: false
+        type: string
+        default: '.'
+      trivy-scanners:
+        description: Trivy scanners (comma-separated; secrets are gitleaks' job).
+        required: false
+        type: string
+        default: vuln
+      trivy-fail-severity:
+        description: Severities that fail the job (fixable findings only).
+        required: false
+        type: string
+        default: CRITICAL
+      trivy-report-severity:
+        description: Severities written to the SARIF report artifact.
+        required: false
+        type: string
+        default: CRITICAL,HIGH,MEDIUM
+      trivy-skip-dirs:
+        description: Comma-separated directories Trivy skips.
+        required: false
+        type: string
+        default: ''
+      gitleaks:
+        description: Run the gitleaks scans.
+        required: false
+        type: boolean
+        default: true
+      gitleaks-config:
+        description: gitleaks config file, relative to the repository root; used when it exists.
+        required: false
+        type: string
+        default: .gitleaks.toml
+    outputs:
+      trivy-result:
+        description: Result of the Trivy job.
+        value: ${{ jobs.trivy.result }}
+      gitleaks-result:
+        description: Result of the gitleaks job.
+        value: ${{ jobs.gitleaks.result }}
+
+permissions: {}
+
+jobs:
+  trivy:
+    name: Trivy (filesystem)
+    if: inputs.trivy
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Trivy (gate, fixable findings fail)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.trivy-scan-ref }}
+          scanners: ${{ inputs.trivy-scanners }}
+          severity: ${{ inputs.trivy-fail-severity }}
+          ignore-unfixed: true
+          skip-dirs: ${{ inputs.trivy-skip-dirs }}
+          format: table
+          exit-code: '1'
+
+      - name: Trivy (SARIF report)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.trivy-scan-ref }}
+          scanners: ${{ inputs.trivy-scanners }}
+          severity: ${{ inputs.trivy-report-severity }}
+          ignore-unfixed: true
+          skip-dirs: ${{ inputs.trivy-skip-dirs }}
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: '0'
+          skip-setup-trivy: true
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-fs-${{ github.job }}-${{ github.run_attempt }}
+          path: trivy-fs.sarif
+          retention-days: 30
+          if-no-files-found: warn
+
+  gitleaks:
+    name: gitleaks (history and net change)
+    if: inputs.gitleaks
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: gitleaks (commits incl. merged-in branches, and net change)
+        uses: ./.github/actions/ci-workflows/common/gitleaks-scan
+        with:
+          config: ${{ inputs.gitleaks-config }}

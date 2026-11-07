@@ -1,0 +1,352 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: .github/workflows/node-lib-release.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# Moved from algoshred/dev .github/workflows/node-lib-release.yml (BOFF-10675, plan section 8).
+# Behaviour is unchanged; the dev copy stays for its existing callers. Added:
+# `runs-on` and `timeout-minutes` inputs (defaults = the old fixed values).
+#
+# Reusable release: build and publish one npm package at a CalVer version (G60).
+#
+# Called from a client repo's .github/workflows/release.yml. Start that file from
+# platform/context/delivery/cicd/templates/release-npm.yml.tmpl, which also chains
+# common-release-finalize.yml (registry landing check, git tag, GitHub Release).
+#
+# Version (CalVer YYYY.MDD.PATCH, the fleet scheme):
+#   * a pushed CalVer tag releases exactly that version;
+#   * a workflow_dispatch with `version` releases that version;
+#   * a workflow_dispatch without it releases today's next free patch, counting
+#     both what the registry already has and the repo's existing tags.
+# A version the registry already has is refused, a tag that already points at a
+# different commit is refused, and the released commit must be on
+# `release-branch` (main): a tag on an unmerged branch cannot publish.
+#
+# Gates before publishing: frozen install, the caller's verify command
+# (lint / type-check / tests), build after the version is stamped into
+# package.json, then a pack check (name, not private, every `bin` target and the
+# `main`/`types` entry are in the tarball).
+#
+# Provenance: `npm publish --provenance` is only accepted for PUBLIC source
+# repositories; npm rejects it for private ones. Every algoshred repo is private
+# today, so callers leave `provenance` false until the repo is made public.
+#
+# Access: algoshred/ci-workflows is private. Its Actions access level must be
+# "organization" (Settings -> Actions -> Access) for other org repos to call this.
+
+name: Release (npm, reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Job timeout in minutes."
+        required: false
+        type: number
+        default: 20
+      package-name:
+        description: "Expected package.json name, e.g. @fluidgrids/cli. The run fails if package.json says otherwise."
+        required: true
+        type: string
+      version:
+        description: "Explicit CalVer version for a dispatch run. Empty = next free patch for today."
+        required: false
+        type: string
+        default: ""
+      working-directory:
+        description: "Directory holding package.json, relative to the repo root."
+        required: false
+        type: string
+        default: "."
+      bun-version-file:
+        description: "Bun version file, relative to the repo root."
+        required: false
+        type: string
+        default: ".bun-version"
+      node-version:
+        description: "Node.js major used for npm (24 ships npm 11)."
+        required: false
+        type: string
+        default: "24"
+      verify-command:
+        description: "Lint, type-check and test command, run after install, e.g. 'bun run lint:check && bun run type-check && bun run test'."
+        required: true
+        type: string
+      build-command:
+        description: "Build command, run after the version is stamped into package.json."
+        required: false
+        type: string
+        default: "bun run build"
+      dist-tag:
+        description: "npm dist-tag to publish under."
+        required: false
+        type: string
+        default: "latest"
+      provenance:
+        description: "Publish with --provenance. Public source repositories only."
+        required: false
+        type: boolean
+        default: false
+      release-branch:
+        description: "Branch the released commit must be on."
+        required: false
+        type: string
+        default: "main"
+      dry-run:
+        description: "Run every gate and `npm publish --dry-run`; publish nothing. Branch gates only warn."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      NPM_TOKEN:
+        description: "npm automation token with publish rights on the package scope. Required unless dry-run."
+        required: false
+    outputs:
+      version:
+        description: "The CalVer version that was (or, in a dry run, would have been) published."
+        value: ${{ jobs.publish.outputs.version }}
+      package-name:
+        description: "The published package name."
+        value: ${{ inputs.package-name }}
+
+permissions: {}
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # id-token is only used when `provenance` is true. A called workflow cannot
+    # request a permission conditionally, so the caller always grants it.
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          package-manager-cache: false
+
+      - name: Check the package name
+        env:
+          PACKAGE_NAME: ${{ inputs.package-name }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          actual=$(jq -r '.name // empty' package.json)
+          if [ "$actual" != "$PACKAGE_NAME" ]; then
+            echo "::error::package.json name is '${actual}', the caller expects '${PACKAGE_NAME}'"
+            exit 1
+          fi
+          if [ "$(jq -r '.private // false' package.json)" = "true" ]; then
+            echo "::error::package.json has \"private\": true; npm would refuse to publish it"
+            exit 1
+          fi
+
+      - name: Resolve the release version
+        id: version
+        env:
+          PACKAGE_NAME: ${{ inputs.package-name }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_BRANCH: ${{ inputs.release-branch }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          err="$RUNNER_TEMP/npm-view.err"
+          if out=$(npm view "$PACKAGE_NAME" versions --json 2>"$err"); then
+            EXISTING_VERSIONS=$(jq -r 'if type == "array" then .[] else . end' <<<"$out")
+          elif grep -q 'E404' "$err" || grep -q 'E404' <<<"$out"; then
+            EXISTING_VERSIONS=""
+            echo "::notice::${PACKAGE_NAME} is not on npm yet; this is its first release"
+          else
+            echo "::error::could not list the published versions of ${PACKAGE_NAME}"
+            cat "$err"
+            exit 1
+          fi
+          EXISTING_TAGS=$(git tag -l)
+
+          # --- calver:begin ---
+          calver_valid() {
+            local v="$1" mdd month day
+            [[ "$v" =~ ^([0-9]{4})\.([1-9][0-9]{0,3})\.(0|[1-9][0-9]*)$ ]] || return 1
+            mdd="${BASH_REMATCH[2]}"
+            month=$((mdd / 100))
+            day=$((mdd % 100))
+            [ "$month" -ge 1 ] && [ "$month" -le 12 ] && [ "$day" -ge 1 ] && [ "$day" -le 31 ]
+          }
+          today="${CALVER_TODAY:-$(date -u '+%Y%m%d')}"
+          prefix="${today:0:4}.$((10#${today:4:4}))"
+          if [ "$REF_TYPE" = "tag" ]; then
+            version="$REF_NAME"
+            source="tag"
+          elif [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+            source="input"
+          else
+            max=0
+            while IFS= read -r v; do
+              case "$v" in
+                "$prefix".*)
+                  patch="${v#"$prefix".}"
+                  if [[ "$patch" =~ ^[0-9]+$ ]] && [ "$((10#$patch))" -gt "$max" ]; then
+                    max=$((10#$patch))
+                  fi
+                  ;;
+              esac
+            done < <(printf '%s\n%s\n' "$EXISTING_VERSIONS" "$EXISTING_TAGS")
+            version="${prefix}.$((max + 1))"
+            source="computed"
+          fi
+          if ! calver_valid "$version"; then
+            echo "::error::'${version}' is not a CalVer YYYY.MDD.PATCH version"
+            exit 1
+          fi
+          if printf '%s\n' "$EXISTING_VERSIONS" | grep -Fxq -- "$version"; then
+            echo "::error::${version} is already published; a registry version can never be replaced"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "source=${source}" >> "$GITHUB_OUTPUT"
+          # --- calver:end ---
+
+          # --- branch-gate:begin ---
+          gate_fail() {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "::warning::dry run: $1"
+            else
+              echo "::error::$1"
+              exit 1
+            fi
+          }
+          if [ "$REF_TYPE" != "tag" ] && [ "$REF_NAME" != "$RELEASE_BRANCH" ]; then
+            gate_fail "releases run from ${RELEASE_BRANCH} or a CalVer tag, not '${REF_NAME}'"
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/${RELEASE_BRANCH}"; then
+            gate_fail "${GITHUB_SHA} is not on origin/${RELEASE_BRANCH}; merge it before releasing"
+          fi
+          if tagged=$(git rev-parse -q --verify "refs/tags/${version}^{commit}"); then
+            if [ "$tagged" != "$GITHUB_SHA" ]; then
+              echo "::error::tag ${version} already points at ${tagged}, not ${GITHUB_SHA}"
+              exit 1
+            fi
+          fi
+          # --- branch-gate:end ---
+          echo "Releasing ${PACKAGE_NAME}@${version} (${source}, ${EVENT_NAME})"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: ${{ inputs.bun-version-file }}
+
+      - name: Install dependencies
+        env:
+          # Bun authenticates to the default registry with NPM_CONFIG_TOKEN, for
+          # private @burdenoff dependencies. Empty is fine for public ones.
+          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: ${{ inputs.working-directory }}
+        run: bun install --frozen-lockfile
+
+      - name: Verify
+        env:
+          VERIFY_COMMAND: ${{ inputs.verify-command }}
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$VERIFY_COMMAND"
+
+      - name: Stamp the version
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        working-directory: ${{ inputs.working-directory }}
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Build
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$BUILD_COMMAND"
+
+      - name: Check the packed tarball
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          npm pack --dry-run --json --ignore-scripts > "$RUNNER_TEMP/pack.json"
+          jq -r '.[0].files[].path' "$RUNNER_TEMP/pack.json" | sed 's#^\./##' | sort -u > "$RUNNER_TEMP/packed.txt"
+          packed_version=$(jq -r '.[0].version' "$RUNNER_TEMP/pack.json")
+          if [ "$packed_version" != "$RELEASE_VERSION" ]; then
+            echo "::error::the tarball would carry version ${packed_version}, not ${RELEASE_VERSION}"
+            exit 1
+          fi
+          # Every file package.json promises must be in the tarball: a CLI whose
+          # bin target was not built installs, then fails on first run.
+          jq -r '
+            [ (if (.bin | type) == "string" then .bin
+               elif (.bin | type) == "object" then .bin[]
+               else empty end),
+              (.main // empty), (.types // empty), (.typings // empty) ]
+            | .[] | sub("^\\./"; "")' package.json > "$RUNNER_TEMP/promised.txt"
+          missing=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if ! grep -Fxq -- "$f" "$RUNNER_TEMP/packed.txt"; then
+              echo "::error::package.json names '${f}' but the tarball does not contain it"
+              missing=1
+            fi
+          done < "$RUNNER_TEMP/promised.txt"
+          [ "$missing" -eq 0 ]
+          echo "Tarball: $(wc -l < "$RUNNER_TEMP/packed.txt") files, $(jq -r '.[0].size' "$RUNNER_TEMP/pack.json") bytes"
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ inputs.dist-tag }}
+          PROVENANCE: ${{ inputs.provenance }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          args=(--access public --tag "$DIST_TAG" --ignore-scripts --registry "https://registry.npmjs.org/")
+          if [ "$PROVENANCE" = "true" ]; then
+            args+=(--provenance)
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            npm publish "${args[@]}" --dry-run
+            exit 0
+          fi
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN is not available to this repository; pass it with 'secrets: NPM_TOKEN: \${{ secrets.NPM_TOKEN }}'"
+            exit 1
+          fi
+          # A throwaway userconfig keeps the token out of the checked-out tree.
+          userconfig="$RUNNER_TEMP/publish.npmrc"
+          echo "//registry.npmjs.org/:_authToken=\${NODE_AUTH_TOKEN}" > "$userconfig"
+          npm publish "${args[@]}" --userconfig "$userconfig"
+          rm -f "$userconfig"
+
+      - name: Summary
+        if: always()
+        env:
+          PACKAGE_NAME: ${{ inputs.package-name }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          {
+            echo "### npm release"
+            echo "* Package: \`${PACKAGE_NAME}@${RELEASE_VERSION:-unresolved}\`"
+            echo "* Dry run: ${DRY_RUN}"
+            echo "* Landing on the registry is checked by common-release-finalize.yml, not here: npm can report success for a version that never appears."
+          } >> "$GITHUB_STEP_SUMMARY"

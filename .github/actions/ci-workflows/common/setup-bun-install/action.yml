@@ -1,0 +1,149 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: actions/common/setup-bun-install/action.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# setup-bun-install: Bun from the repo's version file, a restored install cache,
+# the lockfile drift guard, a frozen install and (when the repo uses
+# @burdenoff/toolchain) `boff doctor --ci`.
+#
+# The caller checks the repository out first; this action never checks out, so
+# it works for any ref, fetch depth or sparse checkout the job needs.
+name: setup-bun-install
+description: Set up Bun from .bun-version, restore the install cache, guard lockfile drift, install frozen, run boff doctor --ci.
+
+inputs:
+  bun-version-file:
+    description: Bun version file, relative to working-directory.
+    required: false
+    default: .bun-version
+  working-directory:
+    description: Directory holding package.json and bun.lock, relative to the repository root.
+    required: false
+    default: .
+  toolchain-check:
+    description: Run `boff doctor --ci` after the install when @burdenoff/toolchain is a dependency ("true" or "false").
+    required: false
+    default: 'true'
+  lockfile-guard:
+    description: Fail when bun.lock is out of sync with the package.json files ("true" or "false").
+    required: false
+    default: 'true'
+  cache-mode:
+    description: 'write: restore and save the install cache (main). read: restore only (pull requests). off: no cache.'
+    required: false
+    default: write
+  npm-token:
+    description: Token for private @burdenoff packages. Leave empty for public dependencies; an NPM_TOKEN already in the job env is used when this is empty.
+    required: false
+    default: ''
+
+outputs:
+  bun-version:
+    description: The Bun version read from the version file.
+    value: ${{ steps.version.outputs.bun-version }}
+  cache-hit:
+    description: '"true" when the install cache was restored from an exact key match.'
+    value: ${{ steps.cache-write.outputs.cache-hit || steps.cache-read.outputs.cache-hit || 'false' }}
+  has-toolchain:
+    description: '"true" when package.json depends on @burdenoff/toolchain.'
+    value: ${{ steps.toolchain.outputs.has-toolchain }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read the Bun version
+      id: version
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        VERSION_FILE: ${{ inputs.bun-version-file }}
+        CACHE_MODE: ${{ inputs.cache-mode }}
+      run: |
+        set -euo pipefail
+        case "$CACHE_MODE" in
+          write|read|off) ;;
+          *) echo "::error::cache-mode must be write, read or off, not '${CACHE_MODE}'"; exit 1 ;;
+        esac
+        if [ ! -f "$VERSION_FILE" ]; then
+          echo "::error::${VERSION_FILE} is missing in $(pwd); the fleet pins Bun per repository"
+          exit 1
+        fi
+        version=$(tr -d ' \t\r\n' < "$VERSION_FILE")
+        if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::${VERSION_FILE} holds '${version}', not an exact x.y.z Bun version"
+          exit 1
+        fi
+        echo "bun-version=${version}" >> "$GITHUB_OUTPUT"
+        echo "Bun ${version} (from ${VERSION_FILE})"
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version-file: ${{ inputs.working-directory == '.' && inputs.bun-version-file || format('{0}/{1}', inputs.working-directory, inputs.bun-version-file) }}
+
+    - name: Restore and save the install cache
+      id: cache-write
+      if: inputs.cache-mode == 'write'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.bun/install/cache
+        key: ${{ runner.os }}-bun-${{ steps.version.outputs.bun-version }}-${{ hashFiles(format('{0}/bun.lock', inputs.working-directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-bun-${{ steps.version.outputs.bun-version }}-
+
+    - name: Restore the install cache (read-only)
+      id: cache-read
+      if: inputs.cache-mode == 'read'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.bun/install/cache
+        key: ${{ runner.os }}-bun-${{ steps.version.outputs.bun-version }}-${{ hashFiles(format('{0}/bun.lock', inputs.working-directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-bun-${{ steps.version.outputs.bun-version }}-
+
+    - name: Registry credentials
+      shell: bash
+      env:
+        INPUT_NPM_TOKEN: ${{ inputs.npm-token }}
+      run: |
+        set -euo pipefail
+        # Only a provided token is exported. Public dependencies need none, and an
+        # empty NPM_TOKEN would still be expanded into a bunfig scope.
+        token="${INPUT_NPM_TOKEN:-${NPM_TOKEN:-}}"
+        if [ -n "$token" ]; then
+          echo "::add-mask::${token}"
+          {
+            echo "NPM_TOKEN=${token}"
+            echo "NPM_CONFIG_TOKEN=${token}"
+          } >> "$GITHUB_ENV"
+          echo "Registry token: provided"
+        else
+          echo "Registry token: none (public dependencies only)"
+        fi
+
+    - name: Lockfile drift guard
+      if: inputs.lockfile-guard == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: bash "$GITHUB_ACTION_PATH/lockfile-guard.sh"
+
+    - name: Install dependencies (frozen)
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: bun install --frozen-lockfile
+
+    - name: Detect @burdenoff/toolchain
+      id: toolchain
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        if jq -e '((.devDependencies // {}) + (.dependencies // {})) | has("@burdenoff/toolchain")' package.json > /dev/null; then
+          echo "has-toolchain=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has-toolchain=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Toolchain contract (boff doctor --ci)
+      if: inputs.toolchain-check == 'true' && steps.toolchain.outputs.has-toolchain == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: ./node_modules/.bin/boff doctor --ci

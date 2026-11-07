@@ -1,21 +1,9 @@
 {
+  "extends": "@burdenoff/toolchain/tsconfig/node-lib.json",
   "compilerOptions": {
     "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "declaration": true,
-    "declarationMap": false,
-    "sourceMap": false,
-    "resolveJsonModule": true,
-    "types": ["bun-types"],
     "lib": ["ESNext"],
-    "allowImportingTsExtensions": false,
-    "noEmit": false
+    "types": ["bun"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]

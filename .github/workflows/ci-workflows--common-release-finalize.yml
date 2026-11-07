@@ -1,0 +1,255 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: .github/workflows/common-release-finalize.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# Moved from algoshred/dev .github/workflows/common-release-finalize.yml (BOFF-10675, plan section 8).
+# Behaviour is unchanged; the dev copy stays for its existing callers. Added:
+# `runs-on` and `timeout-minutes` inputs (defaults = the old fixed values).
+#
+# Reusable release finalizer for npm and PyPI packages (G60).
+#
+# Runs after the caller's publish job (node-lib-release.yml, or the PyPI upload that
+# follows python-release.yml):
+#   1. waits until the registry actually serves <package>@<version>. A publish
+#      that reports success is not proof it landed (it has happened in this
+#      fleet), so nothing is tagged until the registry answers;
+#   2. downloads the published artifact, checks it against the registry's own
+#      digest, and runs the caller's optional smoke command against it
+#      (PACKAGE_TARBALL for npm, PACKAGE_WHEEL for PyPI);
+#   3. creates the CalVer git tag on the released commit, unless a pushed tag
+#      started the run (then it checks that tag points at this commit);
+#   4. creates the GitHub Release.
+# Re-running only this job after a transient failure is safe: every step checks
+# before it writes.
+#
+# It never needs a checkout: tags and releases go through the REST API.
+
+name: Release finalize (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      timeout-minutes:
+        description: "Job timeout in minutes."
+        required: false
+        type: number
+        default: 20
+      registry:
+        description: "npm or pypi."
+        required: true
+        type: string
+      package-name:
+        description: "Package name as published, e.g. @fluidgrids/cli or fluidgrids-sdk."
+        required: true
+        type: string
+      version:
+        description: "The CalVer version the publish job released."
+        required: true
+        type: string
+      dist-tag:
+        description: "npm only: the dist-tag the publish used. The GitHub Release is marked latest only for 'latest'."
+        required: false
+        type: string
+        default: "latest"
+      smoke-command:
+        description: "Optional command run against the downloaded artifact (env PACKAGE_TARBALL / PACKAGE_WHEEL, RELEASE_VERSION, PACKAGE_NAME)."
+        required: false
+        type: string
+        default: ""
+      install-hint:
+        description: "Install line for the release notes. Default: the npm or pip command for the exact version."
+        required: false
+        type: string
+        default: ""
+      landing-timeout-seconds:
+        description: "How long to wait for the registry to serve the version."
+        required: false
+        type: number
+        default: 600
+      dry-run:
+        description: "Skip the registry wait, the tag and the release; write the summary only."
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  finalize:
+    name: Verify landing, tag, release
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      REGISTRY: ${{ inputs.registry }}
+      PACKAGE_NAME: ${{ inputs.package-name }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      DIST_TAG: ${{ inputs.dist-tag }}
+      DRY_RUN: ${{ inputs.dry-run }}
+    steps:
+      - name: Check inputs
+        run: |
+          case "$REGISTRY" in
+            npm|pypi) ;;
+            *) echo "::error::registry must be npm or pypi, not '${REGISTRY}'"; exit 1 ;;
+          esac
+          if ! [[ "$RELEASE_VERSION" =~ ^[0-9]{4}\.[1-9][0-9]{0,3}\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::'${RELEASE_VERSION}' is not a CalVer YYYY.MDD.PATCH version"
+            exit 1
+          fi
+
+      - if: inputs.registry == 'npm'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - if: inputs.registry == 'pypi'
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.18"
+          python-version: "3.13"
+          enable-cache: false
+
+      - name: Wait for the registry to serve the version
+        if: ${{ !inputs.dry-run }}
+        env:
+          TIMEOUT: ${{ inputs.landing-timeout-seconds }}
+        run: |
+          deadline=$(( $(date +%s) + TIMEOUT ))
+          while :; do
+            if [ "$REGISTRY" = "npm" ]; then
+              served=$(npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version 2>/dev/null || true)
+              tagged=$(npm view "$PACKAGE_NAME" "dist-tags.${DIST_TAG}" 2>/dev/null || true)
+              if [ "$served" = "$RELEASE_VERSION" ] && [ "$tagged" = "$RELEASE_VERSION" ]; then
+                break
+              fi
+            else
+              code=$(curl -sS -o "$RUNNER_TEMP/release.json" -w '%{http_code}' \
+                "https://pypi.org/pypi/${PACKAGE_NAME}/${RELEASE_VERSION}/json" || true)
+              if [ "$code" = "200" ] && [ "$(jq '.urls | length' "$RUNNER_TEMP/release.json")" -gt 0 ]; then
+                break
+              fi
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::${PACKAGE_NAME} ${RELEASE_VERSION} is still not served by ${REGISTRY} after ${TIMEOUT}s; the publish did not land"
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "${REGISTRY} serves ${PACKAGE_NAME} ${RELEASE_VERSION}"
+
+      - name: Download and check the published artifact
+        id: artifact
+        if: ${{ !inputs.dry-run }}
+        run: |
+          dir="$RUNNER_TEMP/published"
+          mkdir -p "$dir"
+          if [ "$REGISTRY" = "npm" ]; then
+            file=$(cd "$dir" && npm pack "${PACKAGE_NAME}@${RELEASE_VERSION}" --json | jq -r '.[0].filename')
+            want=$(npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" dist.shasum)
+            got=$(sha1sum "$dir/$file" | cut -d' ' -f1)
+            echo "PACKAGE_TARBALL=$dir/$file" >> "$GITHUB_ENV"
+          else
+            url=$(jq -r '[.urls[] | select(.packagetype == "bdist_wheel")][0].url' "$RUNNER_TEMP/release.json")
+            want=$(jq -r '[.urls[] | select(.packagetype == "bdist_wheel")][0].digests.sha256' "$RUNNER_TEMP/release.json")
+            if [ -z "$url" ] || [ "$url" = "null" ]; then
+              echo "::error::PyPI lists no wheel for ${PACKAGE_NAME} ${RELEASE_VERSION}"
+              exit 1
+            fi
+            file="${url##*/}"
+            curl -sSfL -o "$dir/$file" "$url"
+            got=$(sha256sum "$dir/$file" | cut -d' ' -f1)
+            echo "PACKAGE_WHEEL=$dir/$file" >> "$GITHUB_ENV"
+          fi
+          if [ "$want" != "$got" ]; then
+            echo "::error::downloaded ${file} hashes to ${got}, the registry says ${want}"
+            exit 1
+          fi
+          echo "Downloaded ${file}; digest matches the registry"
+
+      - name: Smoke test the published artifact
+        if: ${{ !inputs.dry-run && inputs.smoke-command != '' }}
+        env:
+          SMOKE_COMMAND: ${{ inputs.smoke-command }}
+        working-directory: ${{ runner.temp }}
+        run: bash -euo pipefail -c "$SMOKE_COMMAND"
+
+      - name: Tag the released commit
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if ref=$(gh api "repos/${REPO}/git/ref/tags/${RELEASE_VERSION}" 2>/dev/null); then
+            sha=$(jq -r '.object.sha' <<<"$ref")
+            if [ "$(jq -r '.object.type' <<<"$ref")" = "tag" ]; then
+              sha=$(gh api "repos/${REPO}/git/tags/${sha}" --jq '.object.sha')
+            fi
+            if [ "$sha" != "$GITHUB_SHA" ]; then
+              echo "::error::tag ${RELEASE_VERSION} points at ${sha}, but ${GITHUB_SHA} was released"
+              exit 1
+            fi
+            echo "Tag ${RELEASE_VERSION} already points at the released commit"
+          else
+            # A tag created with GITHUB_TOKEN does not start another workflow run,
+            # so this cannot re-trigger the tag-push release.
+            gh api "repos/${REPO}/git/refs" -f "ref=refs/tags/${RELEASE_VERSION}" -f "sha=${GITHUB_SHA}" > /dev/null
+            echo "Created tag ${RELEASE_VERSION} at ${GITHUB_SHA}"
+          fi
+
+      - name: Create the GitHub Release
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INSTALL_HINT: ${{ inputs.install-hint }}
+        run: |
+          if gh release view "$RELEASE_VERSION" --repo "$REPO" > /dev/null 2>&1; then
+            echo "Release ${RELEASE_VERSION} already exists"
+            exit 0
+          fi
+          if [ "$REGISTRY" = "npm" ]; then
+            title="${PACKAGE_NAME}@${RELEASE_VERSION}"
+            link="https://www.npmjs.com/package/${PACKAGE_NAME}/v/${RELEASE_VERSION}"
+            hint="${INSTALL_HINT:-npm install ${PACKAGE_NAME}@${RELEASE_VERSION}}"
+          else
+            title="${PACKAGE_NAME}==${RELEASE_VERSION}"
+            link="https://pypi.org/project/${PACKAGE_NAME}/${RELEASE_VERSION}/"
+            hint="${INSTALL_HINT:-pip install ${PACKAGE_NAME}==${RELEASE_VERSION}}"
+          fi
+          latest="--latest=false"
+          if [ "$REGISTRY" = "pypi" ] || [ "$DIST_TAG" = "latest" ]; then
+            latest="--latest"
+          fi
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            echo "## ${title}"
+            echo
+            echo '```bash'
+            echo "$hint"
+            echo '```'
+            echo
+            echo "- Registry: ${link}"
+            echo "- Commit: ${GITHUB_SERVER_URL}/${REPO}/commit/${GITHUB_SHA}"
+          } > "$notes"
+          gh release create "$RELEASE_VERSION" --repo "$REPO" --verify-tag \
+            --title "$title" --notes-file "$notes" "$latest"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Release finalize"
+            echo "* ${REGISTRY}: \`${PACKAGE_NAME}\` ${RELEASE_VERSION}"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "* Dry run: registry wait, tag and GitHub Release skipped"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,146 +1,75 @@
-# Release — Publish production release to npmjs as @vibecontrols/vibe-plugin-*
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: templates/plugin/release.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# Release caller for a public vibe plugin (plan sections 8.3 and 10.7).
 #
-# Trigger: Manual workflow_dispatch or CalVer git tag push
-# Publishes to: https://www.npmjs.com/ (public)
-# Also publishes same version to npmjs (private, internal)
+# Every push to main publishes the next free CalVer (YYYY.MDD.PATCH) of the
+# package to npmjs under the `latest` dist-tag, as the plugin fleet always has.
+# A pushed CalVer tag releases exactly that version, and a manual dispatch
+# releases the given version (or the next free one when left empty).
 #
-# CalVer: YYYY.MDD.PATCH (semver-compatible, no zero-padding)
-# NPM token: NPM_TOKEN (granular token for @vibecontrols scope)
-
+# node-lib-release.yml runs a frozen install, `boff sanity --force` (format
+# check, lint, bun check, build with `tsc --emitDeclarationOnly`, tests), stamps
+# the version, rebuilds, checks the tarball and publishes with npm provenance
+# (these repositories are public). common-release-finalize.yml then waits until
+# npm actually serves the version, verifies the tarball digest, tags the
+# released commit and creates the GitHub Release.
+#
+# Public repositories cannot read the org secret NPM_TOKEN, so the publish token
+# is the repository secret NPMJS_VIBECONTROLS_TOKEN (NPM_TOKEN stays as a
+# fallback for repositories that were given one).
+#
+# Vendored with scripts/vendor.ts together with plugin/pr-check.yml.
 name: Release
 
 on:
   push:
+    branches: [main]
     tags:
-      - "[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*"
+      - '[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*'
+    # Documentation-only pushes do not publish a new version. This workflow
+    # never emits PR Gate, so the filter cannot wedge a required check.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
     inputs:
       version:
-        description: "CalVer version (e.g., 2026.323.1). Leave empty to auto-compute."
+        description: CalVer version to release (YYYY.MDD.PATCH). Empty = next free patch for today.
         required: false
         type: string
+        default: ''
+
+permissions:
+  contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Release to npmjs
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  publish:
+    uses: ./.github/workflows/ci-workflows--node-lib-release.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      # Every plugin publishes as @vibecontrols/<repository name>; the release
+      # fails if package.json says otherwise.
+      package-name: '@vibecontrols/${{ github.event.repository.name }}'
+      version: ${{ inputs.version || '' }}
+      verify-command: ./node_modules/.bin/boff sanity --force
+      provenance: true
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPMJS_VIBECONTROLS_TOKEN || secrets.NPM_TOKEN }}
+
+  finalize:
+    needs: publish
+    uses: ./.github/workflows/ci-workflows--common-release-finalize.yml
     permissions:
       contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: .bun-version
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Lint & type check
-        run: bun run lint && bun run type:check
-
-      - name: Build
-        run: bun run build
-
-      - name: Pre-cache npm CLI
-        run: bunx npm@latest --version
-
-      - name: Determine version
-        id: version
-        run: |
-          NAME=$(bun -e "console.log(require('./package.json').name)")
-
-          if [ "${{ github.event_name }}" = "push" ] && [ -n "${{ github.ref_name }}" ]; then
-            VERSION="${{ github.ref_name }}"
-          elif [ -n "${{ inputs.version }}" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            echo "::error::workflow_dispatch requires an explicit 'version' input (auto-increment removed to stop version inflation)"
-            exit 1
-          fi
-
-          if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[1-9][0-9]{0,3}\.[0-9]+$'; then
-            echo "::error::Invalid CalVer version: $VERSION (expected YYYY.MDD.PATCH)"
-            exit 1
-          fi
-
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "Releasing: ${NAME}@$VERSION"
-
-      - name: Publish to npmjs (public)
-        run: |
-          cat > .npmrc << 'NPMRC'
-          //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
-          NPMRC
-          sed -i 's/^ *//' .npmrc
-          bunx npm@latest version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
-          if bunx npm@latest view "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}" version --registry "https://registry.npmjs.org/" >/dev/null 2>&1; then
-            echo "npmjs already has ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}; skipping"
-          else
-            bunx npm@latest publish --registry "https://registry.npmjs.org/" --access public --ignore-scripts
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish to npmjs
-        run: |
-          cat > .npmrc << NPMRC
-          //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
-          NPMRC
-          sed -i 's/^ *//' .npmrc
-          if bunx npm@latest view "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}" version  >/dev/null 2>&1; then
-            echo "npmjs already has ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}; skipping"
-          else
-            bunx npm@latest publish --registry "https://registry.npmjs.org/" --tag latest --access public --ignore-scripts
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Create git tag (if manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          git config --local user.email "oss@vibecontrols.com"
-          git config --local user.name "CI"
-          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "Tag ${{ steps.version.outputs.version }} already exists; skipping"
-          else
-            git tag "${{ steps.version.outputs.version }}" -m "Release ${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}"
-            git push origin "${{ steps.version.outputs.version }}"
-          fi
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          NAME="${{ steps.version.outputs.name }}"
-          gh release create "$VERSION" \
-            --title "${NAME}@${VERSION}" \
-            --notes "## ${NAME}@${VERSION}
-
-          ### Install
-          \`\`\`bash
-          npm install ${NAME}@${VERSION}
-          # or
-          bun add ${NAME}@${VERSION}
-          \`\`\`" \
-            --latest \
-            2>/dev/null || echo "Release already exists"
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "### Production Release" >> $GITHUB_STEP_SUMMARY
-          echo "**Package**: \`${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**npmjs**: Published or already present (public)" >> $GITHUB_STEP_SUMMARY
+    with:
+      registry: npm
+      package-name: ${{ needs.publish.outputs.package-name }}
+      version: ${{ needs.publish.outputs.version }}

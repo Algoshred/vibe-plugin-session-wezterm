@@ -1,0 +1,88 @@
+# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# source: actions/common/restore-sanity-cache/action.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
+# restore-sanity-cache: restore (and on main, save) the hash-stamped sanity
+# state of `boff sanity` so a warm run skips every step whose inputs did not
+# change. Keys come from `boff sanity --print-keys`, which computes them
+# without running anything; run this after setup-bun-install.
+name: restore-sanity-cache
+description: Restore the boff sanity stamps and tool caches keyed by boff sanity --print-keys.
+
+inputs:
+  working-directory:
+    description: Directory holding package.json, relative to the repository root.
+    required: false
+    default: .
+  cache-mode:
+    description: 'write: restore and save (main). read: restore only (pull requests).'
+    required: false
+    default: write
+  key-prefix:
+    description: Cache key prefix. Change it to start a separate cache line.
+    required: false
+    default: sanity
+
+outputs:
+  key:
+    description: The combined sanity key (`all=` from print-keys).
+    value: ${{ steps.keys.outputs.all }}
+  cache-hit:
+    description: '"true" when every stamp was restored from an exact key match.'
+    value: ${{ steps.cache-write.outputs.cache-hit || steps.cache-read.outputs.cache-hit || 'false' }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the sanity keys
+      id: keys
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CACHE_MODE: ${{ inputs.cache-mode }}
+      run: |
+        set -euo pipefail
+        case "$CACHE_MODE" in
+          write|read) ;;
+          *) echo "::error::cache-mode must be write or read, not '${CACHE_MODE}'"; exit 1 ;;
+        esac
+        if [ ! -x ./node_modules/.bin/boff ]; then
+          echo "::error::./node_modules/.bin/boff is missing; install @burdenoff/toolchain (run setup-bun-install first)"
+          exit 1
+        fi
+        keys="$(./node_modules/.bin/boff sanity --print-keys)"
+        printf '%s\n' "$keys"
+        all="$(printf '%s\n' "$keys" | sed -n 's/^all=\([0-9a-f]\{16,\}\)$/\1/p')"
+        if [ -z "$all" ]; then
+          echo "::error::boff sanity --print-keys printed no all=<key> line"
+          exit 1
+        fi
+        echo "all=${all}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore and save the sanity state
+      id: cache-write
+      if: inputs.cache-mode == 'write'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ inputs.working-directory }}/node_modules/.cache/sanity
+          ${{ inputs.working-directory }}/node_modules/.cache/tsc
+          ${{ inputs.working-directory }}/node_modules/.cache/knip
+          ${{ inputs.working-directory }}/node_modules/.cache/eslint
+          ${{ inputs.working-directory }}/.eslintcache
+        key: ${{ inputs.key-prefix }}-${{ runner.os }}-${{ steps.keys.outputs.all }}
+        restore-keys: |
+          ${{ inputs.key-prefix }}-${{ runner.os }}-
+
+    - name: Restore the sanity state (read-only)
+      id: cache-read
+      if: inputs.cache-mode == 'read'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ${{ inputs.working-directory }}/node_modules/.cache/sanity
+          ${{ inputs.working-directory }}/node_modules/.cache/tsc
+          ${{ inputs.working-directory }}/node_modules/.cache/knip
+          ${{ inputs.working-directory }}/node_modules/.cache/eslint
+          ${{ inputs.working-directory }}/.eslintcache
+        key: ${{ inputs.key-prefix }}-${{ runner.os }}-${{ steps.keys.outputs.all }}
+        restore-keys: |
+          ${{ inputs.key-prefix }}-${{ runner.os }}-

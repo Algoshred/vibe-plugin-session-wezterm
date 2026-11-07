@@ -1,26 +1,14 @@
-import js from "@eslint/js";
-import tseslint from "typescript-eslint";
-import globals from "globals";
+import node from "@burdenoff/toolchain/eslint/node";
 
-export default tseslint.config(
-  {
-    ignores: ["dist/", "node_modules/", "coverage/"],
+// The toolchain Node profile (typescript-eslint recommended, no Prettier
+// plugin) plus the three rules @eslint/js 10's recommended set added, so the
+// effective rule set matches the previous @eslint/js 10 + typescript-eslint
+// config exactly.
+export default node({
+  globals: { Bun: "readonly" },
+  rules: {
+    "no-unassigned-vars": "error",
+    "no-useless-assignment": "error",
+    "preserve-caught-error": ["error", { requireCatchParameter: false }],
   },
-  js.configs.recommended,
-  ...tseslint.configs.recommended,
-  {
-    languageOptions: {
-      globals: {
-        ...globals.node,
-        Bun: "readonly",
-      },
-    },
-    rules: {
-      "@typescript-eslint/no-explicit-any": "warn",
-      "@typescript-eslint/no-unused-vars": [
-        "warn",
-        { argsIgnorePattern: "^_" },
-      ],
-    },
-  },
-);
+});
