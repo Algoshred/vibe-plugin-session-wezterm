@@ -1,4 +1,4 @@
-# vendored from algoshred/ci-workflows@c3f35eb994c2b554eb1a3c61b7ee12e2a687521c
+# vendored from algoshred/ci-workflows@0d0478a87a2e15eb77c969d29113bbacaeb0d211
 # source: templates/plugin/release.yml. Do not edit: regenerate with scripts/vendor.ts in algoshred/ci-workflows.
 # Release caller for a public vibe plugin (plan sections 8.3 and 10.7).
 #
