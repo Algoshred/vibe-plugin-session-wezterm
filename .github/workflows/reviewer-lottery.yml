@@ -1,3 +1,11 @@
+# pull_request_target security safeguards (BOFF-15928):
+# This workflow uses pull_request_target solely to assign reviewers via the
+# repository's base-branch .github/reviewer-lottery.yml configuration.
+# Required invariants (enforced by boff workflow-policy / check-workflow-policy.sh):
+#   1. Explicit least-privilege permissions (contents: read, pull-requests: write).
+#   2. Base-branch checkout only (never PR head ref) with persist-credentials: false.
+#   3. Every action pinned to a full 40-character commit SHA.
+#   4. Zero repository/org secrets (only GITHUB_TOKEN).
 name: Reviewer Lottery
 
 on:
@@ -11,8 +19,13 @@ jobs:
     if: github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read # read .github/reviewer-lottery.yml from the base branch
+      pull-requests: write # request the drawn reviewers
     steps:
-      - uses: actions/checkout@v7
-      - uses: uesteibar/reviewer-lottery@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: uesteibar/reviewer-lottery@a350fd5b906543184e10e9ab84df9329a7246e76 # v4
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}

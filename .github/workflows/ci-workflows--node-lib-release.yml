@@ -327,7 +327,7 @@ jobs:
             exit 0
           fi
           if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::NPM_TOKEN is not available to this repository; pass it with 'secrets: NPM_TOKEN: \${{ secrets.NPM_TOKEN }}'"
+            echo "::error::NPM_TOKEN is not available to this repository; pass the NPM_TOKEN secret from the caller workflow"
             exit 1
           fi
           # A throwaway userconfig keeps the token out of the checked-out tree.
