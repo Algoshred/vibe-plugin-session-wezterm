@@ -109,6 +109,7 @@ jobs:
           skip-dirs: ${{ inputs.trivy-skip-dirs }}
           format: table
           exit-code: '1'
+          cache: 'false'
 
       - name: Trivy (SARIF report)
         if: always()
@@ -124,6 +125,7 @@ jobs:
           output: trivy-fs.sarif
           exit-code: '0'
           skip-setup-trivy: true
+          cache: 'false'
 
       - name: Upload the report
         if: always()
